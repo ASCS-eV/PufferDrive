@@ -26,6 +26,13 @@ lifted onto pure upstream `3.0` unchanged — that is what makes the mirror PR t
 A permanent **draft PR `integration/3.0` → `3.0`** (`DO NOT MERGE — integration stack CI`) keeps a
 live CI verdict on all combined features. **Never merge it** — that would contaminate the mirror.
 
+A second permanent draft PR, **`fork-only/3.0` → `3.0`**, shows the fork-only content on its own,
+with no features mixed in — the quickest answer to "what does this fork add that never goes
+upstream?". Its branch is rebuilt automatically from the `chore(fork):` commit on every push to
+`integration/3.0`, so it never drifts. **Never merge it and never commit to it.** Like the PR above
+it carries `do-not-merge` **alone**: the two labels *together* are reserved for a PR that is
+actively rewriting the process, and a permanent PR wearing both would signal that forever.
+
 When upstream advances, a bot opens a `mirror-sync` issue asking a maintainer to rebase the stack.
 
 ## Working on a feature
@@ -107,8 +114,8 @@ you ran in the PR.
 Two kinds, checked differently.
 
 **Files that exist only here** — `CONTRIBUTING.md`, `.github/copilot-instructions.md`,
-`.github/pull_request_template.md`, `.github/workflows/sync-mirror.yml`. None may appear in a
-feature diff.
+`.github/pull_request_template.md`, `.github/workflows/sync-mirror.yml`,
+`.github/workflows/fork-only-view.yml`. None may appear in a feature diff.
 
 **Fork-only hunks inside shared files** — the `fork:begin`/`fork:end` block in `AGENTS.md` and
 `CLAUDE.md`, and the `integration/3.0` entry in the `pull_request` branch filter of
@@ -128,8 +135,10 @@ Fork-only content is kept as **exactly one** `chore(fork):` commit at the base o
 every other commit on the stack is obviously contributable. To change it:
 
 1. Branch `chore/<slug>` off `integration/3.0`, one commit.
-2. Open it as a **draft** PR titled `[do-not-mirror] chore(fork): …` with the `do-not-mirror` label,
-   and tick "Never upstream" in the template. Four redundant markers, on purpose.
+2. Open it as a **draft** PR titled `[do-not-mirror][do-not-merge] chore(fork): …`, carrying **both**
+   labels, and tick "Never upstream" in the template. Two independent axes: `do-not-mirror` means it
+   must never reach upstream, `do-not-merge` means the merge button is never pressed on it — merging
+   would leave a second `chore(fork):` commit and abort every future sync.
 3. Green CI and an adversarial review are still required. Upstream-readiness is not — it cannot be.
 4. It is then **folded into the base commit by fixup and force-pushed**, not merged with the button
    (which would leave two fork commits). The PR ends up closed rather than merged; post the
@@ -162,9 +171,11 @@ determinism, and performance rules. Follow it; we do not maintain a competing st
 - commit to `3.0` — it is auto-synced, blocks force-pushes and deletions, and any direct commit
   trips the sync workflow's fast-forward check
 - merge the standing `integration/3.0 → 3.0` draft PR
+- merge the standing `fork-only/3.0 → 3.0` draft PR, or commit to that branch — it is force-pushed
+  from the `chore(fork):` commit and anything committed to it is silently discarded
 - create merge commits on `integration/3.0`
 - branch a feature off another unmerged feature
-- open a PR that targets `3.0` (the standing draft PR is the only one that ever may)
+- open a PR that targets `3.0` (the two standing draft PRs are the only ones that ever may)
 - run the `update-smoke-golden` workflow against `3.0` — it pushes commits to the branch it runs on
 - commit secrets, internal identifiers, internal URLs, or proprietary scenario data — this fork is
   public
