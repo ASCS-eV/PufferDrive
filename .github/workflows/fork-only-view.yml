@@ -1,0 +1,144 @@
+name: Fork-only view
+
+# Fork-only. Verifies that the `fork-only/3.0` view branch still matches the single
+# `chore(fork):` commit on `integration/3.0`, and that its standing draft PR is intact.
+#
+# It deliberately does NOT publish the branch. The fork base is made almost entirely of
+# files under `.github/workflows/`, and GitHub blocks `GITHUB_TOKEN` from pushing any
+# commit that creates or updates a workflow file — a platform rule no `permissions:`
+# block can lift. Publishing therefore happens by hand, in the two procedures that
+# already force-push with human credentials (sections 3.3 and 7). This job is the
+# detector that makes drift loud, and it needs no write access at all.
+#
+# Never cherry-pick this workflow upstream.
+
+on:
+  push:
+    branches:
+      - 'integration/3.0'
+      - 'fork-only/3.0'
+  schedule:
+    - cron: '41 5 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: fork-only-view
+  cancel-in-progress: false
+
+jobs:
+  check:
+    name: Check fork-only/3.0 is current
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout integration stack
+        uses: actions/checkout@v4
+        with:
+          ref: 'integration/3.0'
+          fetch-depth: 0
+
+      - name: Resolve and verify the fork base commit
+        id: base
+        run: |
+          git fetch --no-tags origin '+refs/heads/3.0:refs/remotes/origin/3.0'
+          mirror=$(git rev-parse refs/remotes/origin/3.0)
+
+          if ! git merge-base --is-ancestor "$mirror" HEAD; then
+            echo "::error::integration/3.0 does not contain the 3.0 mirror tip; rebase the stack."
+            exit 1
+          fi
+
+          # Pipe-free: `git log | grep -q` returns 141 under pipefail once the log is large
+          # enough for grep to exit first, which silently turns these guards off.
+          if [ -n "$(git rev-list --min-parents=2 --max-count=1 "$mirror..HEAD")" ]; then
+            echo "::error::merge commit on the stack; integration/3.0 must stay linear."
+            exit 1
+          fi
+
+          if [ -n "$(git log --grep='^fixup!' --max-count=1 --format=%H "$mirror..HEAD")" ]; then
+            echo "::error::stray fixup! commit on the stack."
+            exit 1
+          fi
+
+          count=$(git log --format=%s "$mirror..HEAD" | grep -c '^chore(fork): ' || true)
+          if [ "$count" != "1" ]; then
+            echo "::error::expected exactly 1 chore(fork): commit on the stack, found $count."
+            exit 1
+          fi
+
+          base=$(git rev-list "$mirror..HEAD" | tail -1)
+          case "$(git log -1 --format=%s "$base")" in
+            'chore(fork): '*) ;;
+            *) echo "::error::oldest stack commit $base is not the fork base."; exit 1 ;;
+          esac
+
+          # "<sha> <parent>" is exactly two words; a root or merge commit is not.
+          if [ "$(git rev-list --parents -n 1 "$base" | wc -w)" != "2" ]; then
+            echo "::error::fork base $base does not have exactly one parent."
+            exit 1
+          fi
+
+          if [ "$(git rev-parse "$base^")" != "$mirror" ]; then
+            echo "::error::fork base $base is not parented on the 3.0 mirror tip $mirror."
+            exit 1
+          fi
+
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+
+      - name: Check the view branch is current
+        env:
+          BASE: ${{ steps.base.outputs.base }}
+        run: |
+          published=$(git ls-remote origin refs/heads/fork-only/3.0 | cut -f1)
+          fix="git push --force origin $BASE:refs/heads/fork-only/3.0"
+
+          if [ -z "$published" ]; then
+            echo "::error::fork-only/3.0 does not exist. Publish it with: $fix"
+            exit 1
+          fi
+
+          if [ "$published" != "$BASE" ]; then
+            echo "::error::fork-only/3.0 is stale ($published); the fork base is $BASE. Republish with: $fix"
+            exit 1
+          fi
+
+          echo "fork-only/3.0 is current at $BASE."
+
+      - name: Check the standing view PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh pr list --head fork-only/3.0 --state all --limit 100 \
+            --json number,state,baseRefName,isDraft,labels > prs.json
+
+          if [ "$(jq '[.[] | select(.state == "MERGED")] | length' prs.json)" != "0" ]; then
+            echo "::error::a fork-only/3.0 PR was MERGED into the 3.0 mirror — the mirror is contaminated."
+            exit 1
+          fi
+
+          open_count=$(jq '[.[] | select(.state == "OPEN")] | length' prs.json)
+
+          if [ "$open_count" = "0" ]; then
+            echo "::warning::no standing fork-only/3.0 PR is open — see section 2."
+            exit 0
+          fi
+
+          if [ "$open_count" != "1" ]; then
+            echo "::error::$open_count open fork-only/3.0 PRs; exactly one standing PR is expected."
+            exit 1
+          fi
+
+          bad=$(jq -r '.[] | select(.state == "OPEN")
+            | select(.baseRefName != "3.0" or .isDraft != true
+                     or ([.labels[].name] | index("do-not-merge") | not))
+            | "#\(.number) base=\(.baseRefName) draft=\(.isDraft) labels=\([.labels[].name] | join(","))"' prs.json)
+
+          if [ -n "$bad" ]; then
+            echo "::error::standing view PR breaks its contract (base 3.0, draft, do-not-merge): $bad"
+            exit 1
+          fi
+
+          echo "Standing view PR is intact."
