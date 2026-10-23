@@ -321,3 +321,5 @@ CUDA_VISIBLE_DEVICES=None LD_PRELOAD=$(gcc -print-file-name=libasan.so) python -
 # or
 gdb --args python -m pufferlib.pufferl train puffer_drive train.device=cpu vec.backend=Serial
 ```
+
+<!-- ci baseline probe -->
