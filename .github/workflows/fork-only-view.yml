@@ -1,0 +1,114 @@
+name: Fork-only view
+
+# Fork-only. Republishes the single `chore(fork):` commit as `fork-only/3.0`,
+# so a standing draft PR into `3.0` shows every fork-only change and nothing
+# else. The branch is a derived view and is force-pushed; never commit to it.
+# Never cherry-pick this workflow upstream.
+
+on:
+  push:
+    branches: [ 'integration/3.0' ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: read
+
+concurrency:
+  group: fork-only-view
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    name: Republish fork-only/3.0
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout integration stack
+        uses: actions/checkout@v4
+        with:
+          ref: 'integration/3.0'
+          fetch-depth: 0
+
+      - name: Resolve and verify the fork base commit
+        id: base
+        run: |
+          git fetch --no-tags origin '+refs/heads/3.0:refs/remotes/origin/3.0'
+          mirror=$(git rev-parse refs/remotes/origin/3.0)
+
+          if ! git merge-base --is-ancestor "$mirror" HEAD; then
+            echo "::error::integration/3.0 does not contain the 3.0 mirror tip; rebase the stack."
+            exit 1
+          fi
+
+          if git rev-list --min-parents=2 "$mirror..HEAD" | grep -q .; then
+            echo "::error::merge commit on the stack; integration/3.0 must stay linear."
+            exit 1
+          fi
+
+          if git log --format=%s "$mirror..HEAD" | grep -q '^fixup!'; then
+            echo "::error::stray fixup! commit on the stack."
+            exit 1
+          fi
+
+          count=$(git log --format=%s "$mirror..HEAD" | grep -c '^chore(fork): ' || true)
+          if [ "$count" != "1" ]; then
+            echo "::error::expected exactly 1 chore(fork): commit on the stack, found $count."
+            exit 1
+          fi
+
+          base=$(git rev-list "$mirror..HEAD" | tail -1)
+          if [ -z "$base" ]; then
+            echo "::error::integration/3.0 carries no commits over 3.0."
+            exit 1
+          fi
+
+          if ! git log -1 --format=%s "$base" | grep -q '^chore(fork): '; then
+            echo "::error::oldest stack commit $base is not the fork base."
+            exit 1
+          fi
+
+          # "<sha> <parent>" is exactly two words; a root or merge commit is not.
+          if [ "$(git rev-list --parents -n 1 "$base" | wc -w)" != "2" ]; then
+            echo "::error::fork base $base does not have exactly one parent."
+            exit 1
+          fi
+
+          if [ "$(git rev-parse "$base^")" != "$mirror" ]; then
+            echo "::error::fork base $base is not parented on the 3.0 mirror tip $mirror."
+            exit 1
+          fi
+
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+
+      - name: Force-push the view branch
+        env:
+          BASE: ${{ steps.base.outputs.base }}
+        run: |
+          git push --force origin "$BASE:refs/heads/fork-only/3.0"
+          {
+            echo "### Fork-only view refreshed"
+            echo "\`fork-only/3.0\` -> \`$BASE\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Check the standing view PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          merged=$(gh pr list --head fork-only/3.0 --base '3.0' --state merged --json number --jq 'length')
+          if [ "$merged" != "0" ]; then
+            echo "::error::a fork-only/3.0 PR was MERGED into the 3.0 mirror — the mirror is contaminated."
+            exit 1
+          fi
+
+          open=$(gh pr list --head fork-only/3.0 --base '3.0' --state open --json number --jq 'length')
+          if [ "$open" -gt 1 ]; then
+            echo "::error::$open open fork-only/3.0 PRs; exactly one standing PR is expected."
+            exit 1
+          fi
+
+          if [ "$open" = "0" ]; then
+            echo "::warning::no standing fork-only/3.0 PR is open. A human opens it once — see section 2."
+            exit 0
+          fi
+
+          echo "Standing view PR #$(gh pr list --head fork-only/3.0 --base '3.0' --state open --json number --jq '.[0].number') is open."
