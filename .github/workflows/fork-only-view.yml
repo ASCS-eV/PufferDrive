@@ -1,0 +1,148 @@
+name: Fork-only view
+
+# Fork-only. Verifies that the `fork-only/3.0` view branch still matches the single
+# `chore(fork):` commit on `integration/3.0`, and that its standing draft PR is intact.
+#
+# It deliberately does NOT publish the branch. The fork base is made almost entirely of
+# files under `.github/workflows/`, and GitHub blocks `GITHUB_TOKEN` from pushing any
+# commit that creates or updates a workflow file — a platform rule no `permissions:`
+# block can lift. Publishing therefore happens by hand, in the two procedures that
+# already force-push with human credentials (see .github/fork/PROCESS.md). This job is
+# the detector that makes drift loud, and it needs no write access at all.
+#
+# The checks themselves live in .github/fork/forkctl.py so that CI, humans and agents
+# run the same tested code. This file only decides *when* to run them.
+#
+# Residual trust, stated plainly. A workflow cannot be a tamper-proof monitor of the
+# same repository that stores it: on `push`, GitHub runs the workflow *definition* from
+# the pushed ref, so a tampered `fork-only/3.0` can neuter or delete this file before the
+# trusted checkout above ever executes. The backstop is the `schedule:` trigger, which
+# GitHub always runs from the **default branch** (`integration/3.0`) regardless of what
+# any other branch contains -- so tampering is caught within a day even if the push-time
+# run was suppressed. `integration/3.0` policing itself is the irreducible core: it is
+# branch-protected, and section 3.3 / section 7 are the only procedures permitted to
+# force-push it.
+#
+# Never cherry-pick this workflow upstream.
+
+on:
+  push:
+    branches:
+      - 'integration/3.0'
+      - 'fork-only/3.0'
+  schedule:
+    - cron: '41 5 * * *'
+  workflow_dispatch:
+    inputs:
+      stack:
+        description: 'Stack ref to analyse'
+        required: false
+        default: 'origin/integration/3.0'
+      mirror:
+        description: 'Mirror ref to analyse'
+        required: false
+        default: 'origin/3.0'
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: fork-only-view
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    # The name itself carries the verdict's authority: a manual dispatch runs
+    # candidate detector code and must never read as the production check in
+    # the Actions list, where often only the job name and a green tick are seen.
+    name: >-
+      ${{ github.event_name == 'workflow_dispatch'
+          && 'ADVISORY -- candidate detector, not authoritative'
+          || 'Check fork-only/3.0 is current' }}
+    runs-on: ubuntu-latest
+    steps:
+      # The detector must not come from the ref it polices. A push to
+      # `fork-only/3.0` is exactly the tampering this job exists to catch, so the
+      # code is taken from `integration/3.0` -- a protected branch -- and only a
+      # human-driven `workflow_dispatch` may test a candidate ref instead.
+      - name: Checkout the detector
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.ref || 'integration/3.0' }}
+          fetch-depth: 0
+
+      - name: Fetch the refs under analysis
+        run: |
+          git fetch --no-tags origin \
+            '+refs/heads/3.0:refs/remotes/origin/3.0' \
+            '+refs/heads/integration/3.0:refs/remotes/origin/integration/3.0'
+
+      # On push and schedule the production refs are hardcoded, so a dispatch
+      # input can never make the authoritative verdict describe something else.
+      - name: Resolve the refs under analysis
+        id: refs
+        env:
+          EVENT: ${{ github.event_name }}
+          STACK_INPUT: ${{ inputs.stack }}
+          MIRROR_INPUT: ${{ inputs.mirror }}
+        run: |
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            echo "stack=${STACK_INPUT:-origin/integration/3.0}" >> "$GITHUB_OUTPUT"
+            echo "mirror=${MIRROR_INPUT:-origin/3.0}" >> "$GITHUB_OUTPUT"
+          else
+            echo "stack=origin/integration/3.0" >> "$GITHUB_OUTPUT"
+            echo "mirror=origin/3.0" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Report what is being checked
+        env:
+          EVENT: ${{ github.event_name }}
+          STACK: ${{ steps.refs.outputs.stack }}
+          MIRROR: ${{ steps.refs.outputs.mirror }}
+          DETECTOR: ${{ github.event_name == 'workflow_dispatch' && github.ref || 'integration/3.0' }}
+        run: |
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            AUTHORITY="advisory (candidate detector)"
+          else
+            AUTHORITY="authoritative"
+          fi
+          {
+            echo "### Fork-only view check"
+            echo ""
+            echo "| what | ref |"
+            echo "| --- | --- |"
+            echo "| authority | $AUTHORITY |"
+            echo "| detector code from | \`$DETECTOR\` |"
+            echo "| stack analysed | \`$STACK\` |"
+            echo "| mirror analysed | \`$MIRROR\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            {
+              echo ""
+              echo "> **This run is advisory.** A dispatch executes the detector from"
+              echo "> \`$DETECTOR\`, which is candidate code, and may analyse non-production"
+              echo "> refs. Only \`push\` and \`schedule\` runs are authoritative."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Check the stack, the view branch and the standing PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STACK: ${{ steps.refs.outputs.stack }}
+          MIRROR: ${{ steps.refs.outputs.mirror }}
+        run: |
+          python .github/fork/forkctl.py check-view \
+            --stack "$STACK" --mirror "$MIRROR" --format github
+
+  self-test:
+    name: forkctl self-test (candidate ref)
+    runs-on: ubuntu-latest
+    steps:
+      # Advisory only: this deliberately runs the *candidate* code, so it proves
+      # the tool is sound, never that the repository state is.
+      - name: Checkout the triggering ref
+        uses: actions/checkout@v4
+
+      - name: Run the forkctl unit suite
+        run: python .github/fork/test_forkctl.py

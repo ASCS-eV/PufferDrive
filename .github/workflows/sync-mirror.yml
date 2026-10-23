@@ -1,0 +1,132 @@
+name: Sync 3.0 mirror
+
+# Fork-only. Keeps the `3.0` branch a verbatim, fast-forward-only mirror of
+# Emerge-Lab/PufferDrive:3.0. Never cherry-pick this workflow upstream.
+
+on:
+  schedule:
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: sync-mirror
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Fast-forward 3.0 from upstream
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout mirror
+        uses: actions/checkout@v4
+        with:
+          ref: '3.0'
+          fetch-depth: 0
+
+      - name: Fetch upstream
+        run: |
+          git remote add upstream https://github.com/Emerge-Lab/PufferDrive.git
+          git fetch --no-tags upstream 3.0
+
+      - name: Fast-forward mirror
+        id: sync
+        run: |
+          local_sha=$(git rev-parse HEAD)
+          upstream_sha=$(git rev-parse FETCH_HEAD)
+          echo "upstream_sha=$upstream_sha" >> "$GITHUB_OUTPUT"
+
+          if [ "$local_sha" = "$upstream_sha" ]; then
+            echo "3.0 already matches upstream ($upstream_sha). Nothing to do."
+            exit 0
+          fi
+
+          # A non-fast-forward means someone committed to the mirror or upstream
+          # rewrote history. Either way this must be resolved by a human, never
+          # by force-pushing the base that every mirror PR is cut from.
+          if ! git merge-base --is-ancestor "$local_sha" "$upstream_sha"; then
+            echo "::error::3.0 is not an ancestor of upstream/3.0 — refusing to push."
+            echo "Local 3.0:    $local_sha"
+            echo "Upstream 3.0: $upstream_sha"
+            exit 1
+          fi
+
+          git push origin "$upstream_sha:refs/heads/3.0"
+          echo "Fast-forwarded 3.0: $local_sha -> $upstream_sha"
+          {
+            echo "### Mirror updated"
+            echo "\`3.0\`: \`$local_sha\` → \`$upstream_sha\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Check whether the integration stack is behind
+        id: stack
+        run: |
+          upstream_sha="${{ steps.sync.outputs.upstream_sha }}"
+          git fetch --no-tags origin '+refs/heads/integration/3.0:refs/remotes/origin/integration/3.0'
+
+          if git merge-base --is-ancestor "$upstream_sha" refs/remotes/origin/integration/3.0; then
+            echo "needs_rebase=false" >> "$GITHUB_OUTPUT"
+            echo "integration/3.0 already contains $upstream_sha."
+          else
+            behind=$(git rev-list --count "refs/remotes/origin/integration/3.0..$upstream_sha")
+            echo "needs_rebase=true" >> "$GITHUB_OUTPUT"
+            echo "behind=$behind" >> "$GITHUB_OUTPUT"
+            echo "integration/3.0 is missing $behind upstream commit(s)."
+          fi
+
+      - name: Open or update the rebase tracking issue
+        if: steps.stack.outputs.needs_rebase == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UPSTREAM_SHA: ${{ steps.sync.outputs.upstream_sha }}
+          BEHIND: ${{ steps.stack.outputs.behind }}
+          TITLE: Rebase integration/3.0 onto upstream 3.0
+        run: |
+          gh label create mirror-sync --color FBCA04 \
+            --description "Integration stack is behind the upstream mirror" 2>/dev/null || true
+
+          {
+            echo "The \`3.0\` mirror has advanced to \`$UPSTREAM_SHA\`."
+            echo "\`integration/3.0\` is missing **$BEHIND** upstream commit(s)."
+            echo
+            echo '```bash'
+            echo "git fetch origin"
+            echo "git switch integration/3.0"
+            echo "git rebase origin/3.0"
+            echo "make test"
+            echo "git push --force-with-lease origin integration/3.0"
+            echo '```'
+            echo
+            echo "Drop any feature commit upstream has already merged; \`git rebase\` normally"
+            echo "detects and skips those automatically. Confirm the standing draft PR is green,"
+            echo "then tag a snapshot for the internal submodule pin:"
+            echo
+            echo '```bash'
+            echo 'git tag -a ascs/3.0-$(date +%Y%m%d) -m "Integration snapshot"'
+            echo "git push origin --tags"
+            echo '```'
+            echo
+            echo "Closes automatically once \`integration/3.0\` contains the mirror head."
+          } > issue_body.md
+
+          existing=$(gh issue list --label mirror-sync --state open \
+            --search "$TITLE in:title" --json number --jq '.[0].number // empty')
+
+          if [ -n "$existing" ]; then
+            gh issue edit "$existing" --body-file issue_body.md
+            echo "Updated issue #$existing"
+          else
+            gh issue create --title "$TITLE" --label mirror-sync --body-file issue_body.md
+          fi
+
+      - name: Close the tracking issue when the stack is current
+        if: steps.stack.outputs.needs_rebase == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for n in $(gh issue list --label mirror-sync --state open --json number --jq '.[].number'); do
+            gh issue close "$n" --comment "\`integration/3.0\` now contains the mirror head."
+          done
