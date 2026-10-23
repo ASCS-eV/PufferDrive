@@ -28,10 +28,11 @@ live CI verdict on all combined features. **Never merge it** — that would cont
 
 A second permanent draft PR, **`fork-only/3.0` → `3.0`**, shows the fork-only content on its own,
 with no features mixed in — the quickest answer to "what does this fork add that never goes
-upstream?". Its branch is rebuilt automatically from the `chore(fork):` commit on every push to
-`integration/3.0`, so it never drifts. **Never merge it and never commit to it.** Like the PR above
-it carries `do-not-merge` **alone**: the two labels *together* are reserved for a PR that is
-actively rewriting the process, and a permanent PR wearing both would signal that forever.
+upstream?". Its branch is republished by hand whenever the fork base changes (it is the last step of
+the fold and rebase procedures); a workflow fails loudly if it ever drifts. **Never merge it and
+never commit to it.** Like the PR above it carries `do-not-merge` **alone**: the two labels
+*together* are reserved for a PR that is actively rewriting the process, and a permanent PR wearing
+both would signal that forever.
 
 When upstream advances, a bot opens a `mirror-sync` issue asking a maintainer to rebase the stack.
 
