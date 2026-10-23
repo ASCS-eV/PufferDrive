@@ -36,14 +36,50 @@ git switch -c feature/<slug> origin/integration/3.0
 # ... work ...
 pre-commit run --all-files
 make rebuild        # if you touched .c/.h
-make test           # full local suite
-git rebase -i origin/integration/3.0    # squash to exactly ONE commit
+make test           # unit + eval + c + notebooks (NOT docker-smoke or perf — run those separately)
+
+# squash to exactly ONE commit, without needing an editor
+git rebase origin/integration/3.0
+git reset --soft origin/integration/3.0
+git commit -m "feat(scope): subject"    # use -m or -F; a bare `git commit` needs an editor
+git rev-list --count origin/integration/3.0..HEAD    # must print 1
 ```
+
+If the rebase conflicts: resolve, `git add`, then `GIT_EDITOR=true git rebase --continue`
+(plain `--continue` wants an editor). `git rebase --abort` backs out.
 
 Then open a PR against `integration/3.0` and fill in the template.
 
 Keep each PR to one idea. Conventional Commits subjects (`feat(drive): …`, `fix(reward): …`).
-Merge with **rebase and merge** so the stack stays linear.
+A human merges with **Rebase and merge** so the stack stays linear.
+
+First time in a clone? `upstream` is not set up for you:
+
+```bash
+git remote add upstream https://github.com/Emerge-Lab/PufferDrive.git
+gh repo set-default ASCS-eV/PufferDrive
+```
+
+## Before anything is stacked
+
+Opening the PR is not the finish line. `integration/3.0` is what BMW pins *and* the base every
+later feature rebases onto, so a defect merged there is multiplied. Three gates, all required:
+
+1. **Green CI** on the final commit — not "green except a flake", not "green before the last push".
+2. **Adversarial review** by someone other than the author, who tries to *break* the change: revert
+   the fix and prove the new test fails, hunt edge cases, check determinism, check observation and
+   config layout, check hot-path cost, check scope creep. "LGTM" is not a review. The findings go in
+   the PR thread, including the probes that found nothing.
+3. **Proven upstream-readiness** — the commit is cherry-picked onto a branch cut from pure
+   `upstream/3.0` *before* merging. It must apply without conflict and produce an upstream-clean
+   diff. We stack only commits we could contribute today. (`chore(fork):` commits are exempt from
+   this one — they can never be upstream-ready.)
+
+Actually opening the upstream PR is a separate step that needs human approval. Gate 3 only proves
+we *could*.
+
+A correct feature that is not yet upstream-ready stays an open PR. That is a smaller problem than a
+stack nobody can contribute from.
 
 ## Testing expectations
 
@@ -56,28 +92,63 @@ Merge with **rebase and merge** so the stack stays linear.
 | notebooks | `make test-notebooks` |
 | dynamics, rewards, observations, training loop | `make test-docker-smoke` |
 | hot paths | `make -C tests/drive perf` |
-| before marking ready | `make test` |
+| before marking ready | `make test` (unit + eval + c + notebooks only) |
+
+`make test` does **not** run `test-docker-smoke` or the perf target — run those explicitly when the
+table says so. If your change moves the smoke goldens, regenerate them with
+`tests/smoke_tests/update_goldens.sh` and stage both JSON files in the same commit (the rollout
+golden is gitignored and needs `git add -f`).
 
 New behaviour needs a new test; a bug fix needs a test that fails without the fix. List the commands
 you ran in the PR.
 
-## Fork-only files
+## Fork-only content
 
-`CONTRIBUTING.md`, `.github/copilot-instructions.md`, `.github/pull_request_template.md`,
-`.github/workflows/sync-mirror.yml`, the `fork:begin`/`fork:end` block in `AGENTS.md` and
-`CLAUDE.md`, and the `integration/3.0` CI branch filters exist **only in this fork**. They live in a
-single `chore(fork):` commit and must never appear in a feature commit. Before opening a PR:
+Two kinds, checked differently.
+
+**Files that exist only here** — `CONTRIBUTING.md`, `.github/copilot-instructions.md`,
+`.github/pull_request_template.md`, `.github/workflows/sync-mirror.yml`. None may appear in a
+feature diff.
+
+**Fork-only hunks inside shared files** — the `fork:begin`/`fork:end` block in `AGENTS.md` and
+`CLAUDE.md`, and the `integration/3.0` entry in the `pull_request` branch filter of
+`.github/workflows/ci.yml` and `.github/workflows/install.yml`. Here the *file* may legitimately
+appear in a feature diff; only those hunks must stay untouched.
 
 ```bash
-git diff --name-only origin/integration/3.0...HEAD   # none of the above may appear
+git rev-list --count origin/integration/3.0..HEAD       # exactly 1
+git diff --name-only origin/integration/3.0...HEAD      # no fork-only file
+git diff origin/integration/3.0...HEAD -- AGENTS.md CLAUDE.md \
+    .github/workflows/ci.yml .github/workflows/install.yml   # no fork-only hunk
 ```
+
+## Changing the fork's own files
+
+Fork-only content is kept as **exactly one** `chore(fork):` commit at the base of the stack, so that
+every other commit on the stack is obviously contributable. To change it:
+
+1. Branch `chore/<slug>` off `integration/3.0`, one commit.
+2. Open it as a **draft** PR titled `[do-not-mirror] chore(fork): …` with the `do-not-mirror` label,
+   and tick "Never upstream" in the template. Four redundant markers, on purpose.
+3. Green CI and an adversarial review are still required. Upstream-readiness is not — it cannot be.
+4. It is then **folded into the base commit by fixup and force-pushed**, not merged with the button
+   (which would leave two fork commits). The PR ends up closed rather than merged; post the
+   resulting SHA in the thread.
+
+Full recipe in [`.github/copilot-instructions.md`](.github/copilot-instructions.md) section 3.3.
 
 ## Contributing back upstream
 
 When we decide a feature is ready for `Emerge-Lab/PufferDrive`, a maintainer cherry-picks its single
 commit onto a branch cut from the pure `3.0` mirror and opens the PR there. Coding agents may
-prepare that branch but **must not open an upstream PR without explicit human approval**, and
-upstream's own `AGENTS.md` guidelines apply to anything we send them.
+prepare that branch and may open the PR, but **only after a human has verified the final title,
+body and diff** — the agent may press the button, it does not get to decide the content is fit to
+publish.
+
+Upstream's own `AGENTS.md` guidelines apply to anything we send them, with one declared exception:
+their `AGENTIC_PR` poem-file instruction conflicts with keeping the mirror diff clean, so we
+**disclose AI assistance in the PR body and say that we made that choice** rather than silently
+skipping it. See copilot-instructions.md section 6.1 — silently doing neither is not an option.
 
 ## Code style
 
@@ -86,10 +157,14 @@ determinism, and performance rules. Follow it; we do not maintain a competing st
 
 ## Please don't
 
+- merge a feature PR before it has green CI, an adversarial review, and a verified `mirror/<slug>`
+  cherry-pick onto pure upstream
 - commit to `3.0` — it is auto-synced, blocks force-pushes and deletions, and any direct commit
   trips the sync workflow's fast-forward check
 - merge the standing `integration/3.0 → 3.0` draft PR
 - create merge commits on `integration/3.0`
 - branch a feature off another unmerged feature
+- open a PR that targets `3.0` (the standing draft PR is the only one that ever may)
+- run the `update-smoke-golden` workflow against `3.0` — it pushes commits to the branch it runs on
 - commit secrets, internal identifiers, internal URLs, or proprietary scenario data — this fork is
   public
