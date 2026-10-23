@@ -15,28 +15,47 @@ python setup.py build_ext --inplace --force
 
 ## Tests
 
+Test entry points live in the [`justfile`](justfile) and are run with
+[`just`](https://github.com/casey/just) (`cargo install just`, `brew install just`,
+`uv tool install rust-just`, or `winget install casey.just`).
+
 ```bash
-# Run the local suites: Python unit tests, C sim tests, replay-HTML smoke
-# test, notebook executions. Rebuilds the C extension automatically when a
-# .c/.h file changed, and installs missing test deps.
-make test
+# Run the local suites: Python unit tests, eval integration tests, C sim tests,
+# notebook executions. Rebuilds the C extension automatically when a .c/.h file
+# changed, and installs missing test deps.
+just test
 
 # Individual suites
-make test-unit       # tests/unit_tests
-make test-c          # tests/drive (dynamics, geometry, IDM, collisions, ...)
-make test-smoke      # replay-HTML smoke test
-make test-notebooks  # execute every checked-in notebook end-to-end
+just test-unit       # tests/unit_tests
+just test-eval       # tests/eval
+just test-c          # tests/drive (dynamics, geometry, IDM, collisions, ...)
+just test-notebooks  # execute every checked-in notebook end-to-end
 
 # Force-rebuild the C extension regardless of timestamps
-make rebuild
+just rebuild
 
-# Opt-in: full smoke suite in Docker (train/rollout/eval goldens)
-make test-docker-smoke
+# Opt-in, not part of `just test`
+just test-docker-smoke   # full smoke suite in Docker (train/rollout goldens)
+just perf                # C perf benchmark for hot-path work
 ```
 
-`make help` (or bare `make`) prints this list. Targets call `.venv/bin/python`
+`just` with no arguments prints this list. Recipes call `.venv/bin/python`
 directly, so no venv activation is needed. If your interpreter lives elsewhere
-(conda, a cluster venv), override it: `make PYTHON=/path/to/python test`.
+(conda, a cluster venv), override it: `just python=/path/to/python test`.
+
+A `Makefile` is kept as a thin shim, so `make test` and
+`make PYTHON=/path/to/python test` still work by forwarding to `just`.
+
+### Windows
+
+`just test-c` runs natively on Windows against a MinGW or Clang toolchain and
+needs no venv. Two C tests (`test_error`, `test_drive_map_cache`) assert on
+abort paths via `fork()`, which Windows has no equivalent for; they are skipped
+with an explicit notice, so a native run is not a full pass.
+
+The Python suites do **not** run natively on Windows — `setup.py` emits only
+GCC/Clang flags and `drive.h` requires `unistd.h`, so the C extension cannot be
+built with MSVC. Use WSL, Linux, macOS, or `just test-docker-smoke`.
 
 ## Install (HPC cluster)
 
