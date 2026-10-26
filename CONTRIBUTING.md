@@ -5,8 +5,18 @@ consumed as a git submodule by internal BMW projects.
 
 The **normative, always-current process** lives in
 [`.github/copilot-instructions.md`](.github/copilot-instructions.md) — it is read automatically by
-coding agents, and it is the file to change when the process changes. This page is the short human
-orientation; where the two disagree, that file wins.
+coding agents, and it is the file to change when the process changes. The deep procedures are in
+[`.github/fork/PROCESS.md`](.github/fork/PROCESS.md). This page is the short human orientation;
+where they disagree, those files win.
+
+Every mechanical check described below is implemented once, in
+[`.github/fork/forkctl.py`](.github/fork/forkctl.py), and tested. Run it rather than retyping the
+checks:
+
+```bash
+alias forkctl='python .github/fork/forkctl.py'
+forkctl --help
+```
 
 ## The short version
 
@@ -50,7 +60,7 @@ make test           # unit + eval + c + notebooks (NOT docker-smoke or perf — 
 git rebase origin/integration/3.0
 git reset --soft origin/integration/3.0
 git commit -m "feat(scope): subject"    # use -m or -F; a bare `git commit` needs an editor
-git rev-list --count origin/integration/3.0..HEAD    # must print 1
+forkctl check-commit                    # one commit, and no fork-only content in it
 ```
 
 If the rebase conflicts: resolve, `git add`, then `GIT_EDITOR=true git rebase --continue`
@@ -61,11 +71,11 @@ Then open a PR against `integration/3.0` and fill in the template.
 Keep each PR to one idea. Conventional Commits subjects (`feat(drive): …`, `fix(reward): …`).
 A human merges with **Rebase and merge** so the stack stays linear.
 
-First time in a clone? `upstream` is not set up for you:
+First time in a clone? `forkctl doctor` sets up and checks everything, including whether the process
+itself is mid-change:
 
 ```bash
-git remote add upstream https://github.com/Emerge-Lab/PufferDrive.git
-gh repo set-default ASCS-eV/PufferDrive
+forkctl doctor
 ```
 
 ## Before anything is stacked
@@ -82,6 +92,10 @@ later feature rebases onto, so a defect merged there is multiplied. Three gates,
    `upstream/3.0` *before* merging. It must apply without conflict and produce an upstream-clean
    diff. We stack only commits we could contribute today. (`chore(fork):` commits are exempt from
    this one — they can never be upstream-ready.)
+
+   ```bash
+   forkctl mirror <slug> --sha HEAD
+   ```
 
 Actually opening the upstream PR is a separate step that needs human approval. Gate 3 only proves
 we *could*.
@@ -116,18 +130,19 @@ Two kinds, checked differently.
 
 **Files that exist only here** — `CONTRIBUTING.md`, `.github/copilot-instructions.md`,
 `.github/pull_request_template.md`, `.github/workflows/sync-mirror.yml`,
-`.github/workflows/fork-only-view.yml`. None may appear in a feature diff.
+`.github/workflows/fork-only-view.yml`, and anything under `.github/fork/`. None may appear in a
+feature diff. That list is maintained in code, not here — `python .github/fork/forkctl.py fork-only
+-v` prints the authoritative version.
 
 **Fork-only hunks inside shared files** — the `fork:begin`/`fork:end` block in `AGENTS.md` and
 `CLAUDE.md`, and the `integration/3.0` entry in the `pull_request` branch filter of
 `.github/workflows/ci.yml` and `.github/workflows/install.yml`. Here the *file* may legitimately
 appear in a feature diff; only those hunks must stay untouched.
 
+One command checks all of it, plus the one-commit rule:
+
 ```bash
-git rev-list --count origin/integration/3.0..HEAD       # exactly 1
-git diff --name-only origin/integration/3.0...HEAD      # no fork-only file
-git diff origin/integration/3.0...HEAD -- AGENTS.md CLAUDE.md \
-    .github/workflows/ci.yml .github/workflows/install.yml   # no fork-only hunk
+python .github/fork/forkctl.py check-commit          # --chore on a chore/<slug> branch
 ```
 
 ## Changing the fork's own files
@@ -145,7 +160,7 @@ every other commit on the stack is obviously contributable. To change it:
    (which would leave two fork commits). The PR ends up closed rather than merged; post the
    resulting SHA in the thread.
 
-Full recipe in [`.github/copilot-instructions.md`](.github/copilot-instructions.md) section 3.3.
+Full recipe in [`.github/fork/PROCESS.md`](.github/fork/PROCESS.md) → *Changing fork-only content*.
 
 ## Contributing back upstream
 
@@ -158,7 +173,8 @@ publish.
 Upstream's own `AGENTS.md` guidelines apply to anything we send them, with one declared exception:
 their `AGENTIC_PR` poem-file instruction conflicts with keeping the mirror diff clean, so we
 **disclose AI assistance in the PR body and say that we made that choice** rather than silently
-skipping it. See copilot-instructions.md section 6.1 — silently doing neither is not an option.
+skipping it. See [`.github/fork/PROCESS.md`](.github/fork/PROCESS.md) → *Agent authorship* — the
+exact wording is there, and silently doing neither is not an option.
 
 ## Code style
 

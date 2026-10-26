@@ -28,14 +28,15 @@ New behaviour is covered by a new test / the fix has a test that fails without i
 
 ## Stack hygiene
 
-<!-- chore(fork) branches: the two fork-only checks below are expected to trip by design —
-     write "exempt: chore(fork)" for those. The one-commit check still applies in full. -->
+<!-- One command checks all four boxes:
+       python .github/fork/forkctl.py check-commit
+     On a chore/<slug> branch add --chore: the fork-only checks are exempt by design, the
+     one-commit and subject checks still apply in full. Paste the output below. -->
 
-- [ ] exactly one commit (`git rev-list --count origin/integration/3.0..HEAD` → `1`)
+- [ ] `forkctl check-commit` passes (`--chore` on a fork-only branch)
 - [ ] Conventional Commits subject, rebased on current `integration/3.0`
-- [ ] no fork-only **file** in the diff (`git diff --name-only origin/integration/3.0...HEAD`)
-- [ ] no fork-only **hunk** in a shared file — `AGENTS.md`, `CLAUDE.md`, and the `pull_request`
-      branch filters of `ci.yml` / `install.yml` are untouched in those specific places
+
+<!-- paste the forkctl check-commit output -->
 
 ## Merge gate
 
@@ -44,19 +45,19 @@ New behaviour is covered by a new test / the fix has a test that fails without i
 - [ ] **Gate 1 — CI green** on the final commit (no "green except a flake")
 - [ ] **Gate 2 — adversarial review** posted by someone other than the author; findings fixed or
       explicitly accepted in the thread
-- [ ] **Gate 3 — upstream-readiness proven**: `mirror/<slug>` cherry-picked onto pure
-      `upstream/3.0`, applied without conflict, diff is upstream-clean
+- [ ] **Gate 3 — upstream-readiness proven**: `forkctl mirror <slug> --sha HEAD` passes, i.e. the
+      commit cherry-picks onto pure `upstream/3.0` and its diff is upstream-clean
       <!-- exempt for chore(fork): fork-only changes — tick the "Never upstream" box below -->
 
 Gate 3 result:
 
-<!-- paste `git diff --name-only upstream/3.0...HEAD`, or write "exempt: chore(fork)" -->
+<!-- paste the `forkctl mirror` output, or write "exempt: chore(fork)" -->
 
 ## Upstream disposition
 
 - [ ] Mirror PR to `Emerge-Lab/PufferDrive` requested now — needs a human to verify the final
       title, body and diff first, and the body must carry the authorship disclosure from
-      copilot-instructions.md §6.1
+      `.github/fork/PROCESS.md` → *Agent authorship*
 - [ ] Contributable, but we hold it for now, because: <!-- reason -->
 - [ ] **Never upstream** — fork-only `chore(fork):` change, Gate 3 exempt
 
@@ -73,9 +74,9 @@ Fork-only change? Two independent axes, BOTH must be marked:
     5. title contains [do-not-merge]
     6. the `do-not-merge` label is applied
 
-Merging it would put a SECOND chore(fork) commit on the stack. Section 7 asserts there is exactly
-one, so every future sync would abort. It is folded into the base chore(fork) commit by fixup.
-See .github/copilot-instructions.md section 3.3.
+Merging it would put a SECOND chore(fork) commit on the stack. `forkctl check-stack` asserts there
+is exactly one, so every future sync would abort. It is folded into the base chore(fork) commit by
+fixup instead. See .github/fork/PROCESS.md -> Changing fork-only content.
 -->
 
 

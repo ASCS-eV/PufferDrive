@@ -7,8 +7,21 @@ name: Fork-only view
 # files under `.github/workflows/`, and GitHub blocks `GITHUB_TOKEN` from pushing any
 # commit that creates or updates a workflow file — a platform rule no `permissions:`
 # block can lift. Publishing therefore happens by hand, in the two procedures that
-# already force-push with human credentials (sections 3.3 and 7). This job is the
-# detector that makes drift loud, and it needs no write access at all.
+# already force-push with human credentials (see .github/fork/PROCESS.md). This job is
+# the detector that makes drift loud, and it needs no write access at all.
+#
+# The checks themselves live in .github/fork/forkctl.py so that CI, humans and agents
+# run the same tested code. This file only decides *when* to run them.
+#
+# Residual trust, stated plainly. A workflow cannot be a tamper-proof monitor of the
+# same repository that stores it: on `push`, GitHub runs the workflow *definition* from
+# the pushed ref, so a tampered `fork-only/3.0` can neuter or delete this file before the
+# trusted checkout above ever executes. The backstop is the `schedule:` trigger, which
+# GitHub always runs from the **default branch** (`integration/3.0`) regardless of what
+# any other branch contains -- so tampering is caught within a day even if the push-time
+# run was suppressed. `integration/3.0` policing itself is the irreducible core: it is
+# branch-protected, and section 3.3 / section 7 are the only procedures permitted to
+# force-push it.
 #
 # Never cherry-pick this workflow upstream.
 
@@ -20,6 +33,15 @@ on:
   schedule:
     - cron: '41 5 * * *'
   workflow_dispatch:
+    inputs:
+      stack:
+        description: 'Stack ref to analyse'
+        required: false
+        default: 'origin/integration/3.0'
+      mirror:
+        description: 'Mirror ref to analyse'
+        required: false
+        default: 'origin/3.0'
 
 permissions:
   contents: read
@@ -30,115 +52,97 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  check:
-    name: Check fork-only/3.0 is current
+  verify:
+    # The name itself carries the verdict's authority: a manual dispatch runs
+    # candidate detector code and must never read as the production check in
+    # the Actions list, where often only the job name and a green tick are seen.
+    name: >-
+      ${{ github.event_name == 'workflow_dispatch'
+          && 'ADVISORY -- candidate detector, not authoritative'
+          || 'Check fork-only/3.0 is current' }}
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout integration stack
+      # The detector must not come from the ref it polices. A push to
+      # `fork-only/3.0` is exactly the tampering this job exists to catch, so the
+      # code is taken from `integration/3.0` -- a protected branch -- and only a
+      # human-driven `workflow_dispatch` may test a candidate ref instead.
+      - name: Checkout the detector
         uses: actions/checkout@v4
         with:
-          ref: 'integration/3.0'
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.ref || 'integration/3.0' }}
           fetch-depth: 0
 
-      - name: Resolve and verify the fork base commit
-        id: base
+      - name: Fetch the refs under analysis
         run: |
-          git fetch --no-tags origin '+refs/heads/3.0:refs/remotes/origin/3.0'
-          mirror=$(git rev-parse refs/remotes/origin/3.0)
+          git fetch --no-tags origin \
+            '+refs/heads/3.0:refs/remotes/origin/3.0' \
+            '+refs/heads/integration/3.0:refs/remotes/origin/integration/3.0'
 
-          if ! git merge-base --is-ancestor "$mirror" HEAD; then
-            echo "::error::integration/3.0 does not contain the 3.0 mirror tip; rebase the stack."
-            exit 1
-          fi
-
-          # Pipe-free: `git log | grep -q` returns 141 under pipefail once the log is large
-          # enough for grep to exit first, which silently turns these guards off.
-          if [ -n "$(git rev-list --min-parents=2 --max-count=1 "$mirror..HEAD")" ]; then
-            echo "::error::merge commit on the stack; integration/3.0 must stay linear."
-            exit 1
-          fi
-
-          if [ -n "$(git log --grep='^fixup!' --max-count=1 --format=%H "$mirror..HEAD")" ]; then
-            echo "::error::stray fixup! commit on the stack."
-            exit 1
-          fi
-
-          count=$(git log --format=%s "$mirror..HEAD" | grep -c '^chore(fork): ' || true)
-          if [ "$count" != "1" ]; then
-            echo "::error::expected exactly 1 chore(fork): commit on the stack, found $count."
-            exit 1
-          fi
-
-          base=$(git rev-list "$mirror..HEAD" | tail -1)
-          case "$(git log -1 --format=%s "$base")" in
-            'chore(fork): '*) ;;
-            *) echo "::error::oldest stack commit $base is not the fork base."; exit 1 ;;
-          esac
-
-          # "<sha> <parent>" is exactly two words; a root or merge commit is not.
-          if [ "$(git rev-list --parents -n 1 "$base" | wc -w)" != "2" ]; then
-            echo "::error::fork base $base does not have exactly one parent."
-            exit 1
-          fi
-
-          if [ "$(git rev-parse "$base^")" != "$mirror" ]; then
-            echo "::error::fork base $base is not parented on the 3.0 mirror tip $mirror."
-            exit 1
-          fi
-
-          echo "base=$base" >> "$GITHUB_OUTPUT"
-
-      - name: Check the view branch is current
+      # On push and schedule the production refs are hardcoded, so a dispatch
+      # input can never make the authoritative verdict describe something else.
+      - name: Resolve the refs under analysis
+        id: refs
         env:
-          BASE: ${{ steps.base.outputs.base }}
+          EVENT: ${{ github.event_name }}
+          STACK_INPUT: ${{ inputs.stack }}
+          MIRROR_INPUT: ${{ inputs.mirror }}
         run: |
-          published=$(git ls-remote origin refs/heads/fork-only/3.0 | cut -f1)
-          fix="git push --force origin $BASE:refs/heads/fork-only/3.0"
-
-          if [ -z "$published" ]; then
-            echo "::error::fork-only/3.0 does not exist. Publish it with: $fix"
-            exit 1
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            echo "stack=${STACK_INPUT:-origin/integration/3.0}" >> "$GITHUB_OUTPUT"
+            echo "mirror=${MIRROR_INPUT:-origin/3.0}" >> "$GITHUB_OUTPUT"
+          else
+            echo "stack=origin/integration/3.0" >> "$GITHUB_OUTPUT"
+            echo "mirror=origin/3.0" >> "$GITHUB_OUTPUT"
           fi
 
-          if [ "$published" != "$BASE" ]; then
-            echo "::error::fork-only/3.0 is stale ($published); the fork base is $BASE. Republish with: $fix"
-            exit 1
+      - name: Report what is being checked
+        env:
+          EVENT: ${{ github.event_name }}
+          STACK: ${{ steps.refs.outputs.stack }}
+          MIRROR: ${{ steps.refs.outputs.mirror }}
+          DETECTOR: ${{ github.event_name == 'workflow_dispatch' && github.ref || 'integration/3.0' }}
+        run: |
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            AUTHORITY="advisory (candidate detector)"
+          else
+            AUTHORITY="authoritative"
+          fi
+          {
+            echo "### Fork-only view check"
+            echo ""
+            echo "| what | ref |"
+            echo "| --- | --- |"
+            echo "| authority | $AUTHORITY |"
+            echo "| detector code from | \`$DETECTOR\` |"
+            echo "| stack analysed | \`$STACK\` |"
+            echo "| mirror analysed | \`$MIRROR\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            {
+              echo ""
+              echo "> **This run is advisory.** A dispatch executes the detector from"
+              echo "> \`$DETECTOR\`, which is candidate code, and may analyse non-production"
+              echo "> refs. Only \`push\` and \`schedule\` runs are authoritative."
+            } >> "$GITHUB_STEP_SUMMARY"
           fi
 
-          echo "fork-only/3.0 is current at $BASE."
-
-      - name: Check the standing view PR
+      - name: Check the stack, the view branch and the standing PR
         env:
           GH_TOKEN: ${{ github.token }}
+          STACK: ${{ steps.refs.outputs.stack }}
+          MIRROR: ${{ steps.refs.outputs.mirror }}
         run: |
-          gh pr list --head fork-only/3.0 --state all --limit 100 \
-            --json number,state,baseRefName,isDraft,labels > prs.json
+          python .github/fork/forkctl.py check-view \
+            --stack "$STACK" --mirror "$MIRROR" --format github
 
-          if [ "$(jq '[.[] | select(.state == "MERGED")] | length' prs.json)" != "0" ]; then
-            echo "::error::a fork-only/3.0 PR was MERGED into the 3.0 mirror — the mirror is contaminated."
-            exit 1
-          fi
+  self-test:
+    name: forkctl self-test (candidate ref)
+    runs-on: ubuntu-latest
+    steps:
+      # Advisory only: this deliberately runs the *candidate* code, so it proves
+      # the tool is sound, never that the repository state is.
+      - name: Checkout the triggering ref
+        uses: actions/checkout@v4
 
-          open_count=$(jq '[.[] | select(.state == "OPEN")] | length' prs.json)
-
-          if [ "$open_count" = "0" ]; then
-            echo "::warning::no standing fork-only/3.0 PR is open — see section 2."
-            exit 0
-          fi
-
-          if [ "$open_count" != "1" ]; then
-            echo "::error::$open_count open fork-only/3.0 PRs; exactly one standing PR is expected."
-            exit 1
-          fi
-
-          bad=$(jq -r '.[] | select(.state == "OPEN")
-            | select(.baseRefName != "3.0" or .isDraft != true
-                     or ([.labels[].name] | index("do-not-merge") | not))
-            | "#\(.number) base=\(.baseRefName) draft=\(.isDraft) labels=\([.labels[].name] | join(","))"' prs.json)
-
-          if [ -n "$bad" ]; then
-            echo "::error::standing view PR breaks its contract (base 3.0, draft, do-not-merge): $bad"
-            exit 1
-          fi
-
-          echo "Standing view PR is intact."
+      - name: Run the forkctl unit suite
+        run: python .github/fork/test_forkctl.py
