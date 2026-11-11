@@ -1250,20 +1250,20 @@ class TestRoundThreeRegressions(ForkRepoTest):
         git(self.repo, "switch", "-q", "up")
         commit(self.repo, "upstream: conflicting edit", {"sim.c": "UPSTREAM\n"})
         sha = self.stacked_feature("feat(x): conflicting work", {"sim.c": "OURS\n"}, "feature/interrupted")
-        saved = forkctl.git_rc
+        saved = forkctl.git_try
 
-        def interrupt_after_cherry_pick(*argv: str) -> int:
-            code = saved(*argv)
+        def interrupt_after_cherry_pick(*argv: str) -> tuple[int, str]:
+            result = saved(*argv)
             if argv[0] == "cherry-pick" and "--abort" not in argv:
                 raise KeyboardInterrupt
-            return code
+            return result
 
-        forkctl.git_rc = interrupt_after_cherry_pick
+        forkctl.git_try = interrupt_after_cherry_pick
         try:
             with self.assertRaises(KeyboardInterrupt):
                 run("mirror", "boom", "--sha", sha, "--upstream", "up", "--mirror", "mir", "--stack", "stack")
         finally:
-            forkctl.git_rc = saved
+            forkctl.git_try = saved
         self.assertEqual(git(self.repo, "rev-parse", "--abbrev-ref", "HEAD"), "feature/interrupted")
         self.assertEqual(git(self.repo, "status", "--porcelain"), "")
 
@@ -1509,6 +1509,34 @@ class TestPureHelpers(unittest.TestCase):
         self.assertFalse(forkctl.is_sim_path("docs/pufferlib/notes.c"))
         self.assertFalse(forkctl.is_sim_path("pufferl.py.bak"))
         self.assertFalse(forkctl.is_sim_path("configs/other.yaml"))
+
+
+class TestRoundFourRegressions(ForkRepoTest):
+    """Found by the first run of the gate on a real feature pull request."""
+
+    def test_a_cherry_pick_that_fails_without_conflicts_is_not_entanglement(self) -> None:
+        """The CI runner had no git identity, so the cherry-pick aborted before it
+        ever merged. Reporting that as entanglement sent a reader hunting for
+        fork-only content that was never there."""
+        saved = forkctl.git_try
+        original = forkctl.git_try
+
+        def fake_try(*args: str) -> tuple[int, str]:
+            if args[0] == "cherry-pick":
+                return 1, "fatal: Committer identity unknown"
+            return original(*args)
+
+        forkctl.git_try = fake_try
+        try:
+            code, out = run(
+                "mirror", "feat", "--sha", self.feature, "--upstream", "up", "--mirror", "mir", "--stack", "stack"
+            )
+        finally:
+            forkctl.git_try = saved
+        self.assertEqual(code, 1, out)
+        self.assertIn("Committer identity unknown", out)
+        self.assertIn("broken git environment", out)
+        self.assertNotIn("entangled with fork-only state", out)
 
 
 if __name__ == "__main__":

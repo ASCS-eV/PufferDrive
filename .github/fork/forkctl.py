@@ -151,6 +151,12 @@ def git_rc(*args: str) -> int:
     return proc.returncode
 
 
+def git_try(*args: str) -> tuple[int, str]:
+    """Exit code plus whatever git said, for calls whose failure is diagnosed."""
+    proc = subprocess.run(["git", "--no-pager", *args], capture_output=True, text=True, check=False)
+    return proc.returncode, (proc.stderr.strip() or proc.stdout.strip())
+
+
 def show_file(ref: str, path: str) -> str | None:
     """Contents of `path` at `ref`, or None if it genuinely does not exist.
 
@@ -1183,12 +1189,22 @@ def cmd_mirror(args: argparse.Namespace) -> int:
         # Inside the try: an interrupt between the switch and the first guarded
         # statement would otherwise skip the restoration entirely.
         git("switch", "--detach", args.upstream)
-        if git_rc("cherry-pick", sha) != 0:
+        cherry_rc, cherry_err = git_try("cherry-pick", sha)
+        if cherry_rc != 0:
+            # A cherry-pick that stopped without unmerged paths never reached the
+            # merge: an unusable git environment, not an entangled commit.
+            conflicted = bool(git("diff", "--name-only", "--diff-filter=U"))
             git_rc("cherry-pick", "--abort")
-            report.fail(
-                "cherry-pick onto pure upstream failed -- the commit is entangled with fork-only state",
-                "fix it on the feature branch and re-run",
-            )
+            if conflicted:
+                report.fail(
+                    "cherry-pick onto pure upstream failed -- the commit is entangled with fork-only state",
+                    "fix it on the feature branch and re-run",
+                )
+            else:
+                report.fail(
+                    f"cherry-pick onto pure upstream could not run: {cherry_err}",
+                    "this is a broken git environment, not an upstream-readiness failure",
+                )
         else:
             report.ok("cherry-picks onto pure upstream without conflict")
 

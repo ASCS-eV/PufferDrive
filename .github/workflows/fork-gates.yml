@@ -32,6 +32,13 @@ jobs:
       - name: Put HEAD on a branch
         run: git switch -c gate-head
 
+      # `mirror` cherry-picks, which commits, and a runner has no git identity.
+      # Without this the gate fails with "Committer identity unknown".
+      - name: Configure git
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+
       - name: Fetch upstream
         run: |
           git remote add upstream https://github.com/Emerge-Lab/PufferDrive.git
