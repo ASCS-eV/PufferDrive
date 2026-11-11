@@ -44,7 +44,9 @@ never commit to it.** Like the PR above it carries `do-not-merge` **alone**: the
 *together* are reserved for a PR that is actively rewriting the process, and a permanent PR wearing
 both would signal that forever.
 
-When upstream advances, a bot opens a `mirror-sync` issue asking a maintainer to rebase the stack.
+When upstream advances, a bot opens an issue titled `Rebase integration/3.0 onto upstream 3.0`
+asking a maintainer to rebase the stack. Nothing fails while it is open — being behind upstream is
+a normal window, not a defect.
 
 ## Working on a feature
 
@@ -81,23 +83,38 @@ forkctl doctor
 ## Before anything is stacked
 
 Opening the PR is not the finish line. `integration/3.0` is what BMW pins *and* the base every
-later feature rebases onto, so a defect merged there is multiplied. Three gates, all required:
+later feature rebases onto, so a defect merged there is multiplied. Two checks guard it, and both
+run themselves:
 
 1. **Green CI** on the final commit — not "green except a flake", not "green before the last push".
-2. **Adversarial review** by someone other than the author, who tries to *break* the change: revert
-   the fix and prove the new test fails, hunt edge cases, check determinism, check observation and
-   config layout, check hot-path cost, check scope creep. "LGTM" is not a review. The findings go in
-   the PR thread, including the probes that found nothing.
-3. **Proven upstream-readiness** — the commit is cherry-picked onto a branch cut from pure
-   `upstream/3.0` *before* merging. It must apply without conflict and produce an upstream-clean
-   diff. We stack only commits we could contribute today. (`chore(fork):` commits are exempt from
-   this one — they can never be upstream-ready.)
+2. **The `Fork gates` check** — exactly one commit, a well-formed Conventional Commits subject, no
+   fork-only file or marker in the diff, and the commit cherry-picked onto a branch cut from pure
+   `upstream/3.0` without conflict. We stack only commits we could contribute today. (`chore(fork):`
+   commits are exempt from the upstream half — they can never be upstream-ready.)
+
+   Read the check; never reproduce it by hand. If you want the same answer locally before pushing:
 
    ```bash
-   forkctl mirror <slug> --sha HEAD
+   forkctl check-commit
+   forkctl mirror <slug> --sha HEAD --no-publish
    ```
 
-Actually opening the upstream PR is a separate step that needs human approval. Gate 3 only proves
+**Then a human presses "Rebase and merge". That press is the only manual step, and it is the
+review.** There is no approval to collect first and nothing to post. How hard you read the diff
+before pressing depends on what the change can break — `forkctl track` decides:
+
+- **Track A** (`pufferlib/`, `config/`, `pufferl.py`, `models.py`, `setup.py`, smoke goldens): read
+  it adversarially — try to *break* it. Revert the fix and prove the new test fails, hunt edge
+  cases, check determinism, observation and config layout, hot-path cost, scope creep. Prompts in
+  `.github/fork/PROCESS.md`. Write something down only if you find something.
+- **Track B** (everything else — docs, tooling, workflows, CI, tests): one read of the diff. Does it
+  do what it says, and is it really not sim-affecting?
+
+Either way, **nits are a process bug, not a comment.** Formatting, import order, line length and
+wording belong to `pre-commit`; commit shape and contamination belong to `forkctl`. If one reaches
+you, fix the tool instead of annotating the instance.
+
+Actually opening the upstream PR is a separate step that needs human approval. The check only proves
 we *could*.
 
 A correct feature that is not yet upstream-ready stays an open PR. That is a smaller problem than a
@@ -120,6 +137,11 @@ stack nobody can contribute from.
 table says so. If your change moves the smoke goldens, regenerate them with
 `tests/smoke_tests/update_goldens.sh` and stage both JSON files in the same commit (the rollout
 golden is gitignored and needs `git add -f`).
+
+A **Track B** change — one `forkctl track` reports as touching no simulator path — needs only
+`pre-commit`, plus whatever directly exercises what it changed (its own tests, a workflow
+dispatch). Running the simulator suites to prove a Markdown edit is safe costs twelve minutes and
+proves nothing; CI runs them anyway on the standing stack PR.
 
 New behaviour needs a new test; a bug fix needs a test that fails without the fix. List the commands
 you ran in the PR.
@@ -155,7 +177,8 @@ every other commit on the stack is obviously contributable. To change it:
    labels, and tick "Never upstream" in the template. Two independent axes: `do-not-mirror` means it
    must never reach upstream, `do-not-merge` means the merge button is never pressed on it — merging
    would leave a second `chore(fork):` commit and abort every future sync.
-3. Green CI and an adversarial review are still required. Upstream-readiness is not — it cannot be.
+3. Green CI is still required; the `Fork gates` check detects `chore(fork):` and skips the upstream
+   half, because fork-only content can never be upstream-ready.
 4. It is then **folded into the base commit by fixup and force-pushed**, not merged with the button
    (which would leave two fork commits). The PR ends up closed rather than merged; post the
    resulting SHA in the thread.
@@ -183,8 +206,7 @@ determinism, and performance rules. Follow it; we do not maintain a competing st
 
 ## Please don't
 
-- merge a feature PR before it has green CI, an adversarial review, and a verified `mirror/<slug>`
-  cherry-pick onto pure upstream
+- merge a feature PR before CI and the `Fork gates` check are both green
 - commit to `3.0` — it is auto-synced, blocks force-pushes and deletions, and any direct commit
   trips the sync workflow's fast-forward check
 - merge the standing `integration/3.0 → 3.0` draft PR

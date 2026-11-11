@@ -39,6 +39,28 @@ FORK_OWNER = "ASCS-eV"
 
 FORK_COMMIT_PREFIX = "chore(fork): "
 
+# Paths whose behaviour the submodule consumers depend on: the simulation, the
+# policy, the training loop and the config that drives them. A commit touching
+# any of them is Track A and pays the full review cost (section 4.7); anything
+# else is Track B. Defined here, not in prose, so the two cannot drift apart.
+# The list is deliberately coarse: over-classifying costs a review, while
+# under-classifying ships unreviewed sim behaviour.
+SIM_PATHS = (
+    "pufferl.py",
+    "models.py",
+    "setup.py",
+)
+
+SIM_PREFIXES = (
+    "pufferlib/",
+    "config/",
+    "tests/smoke_tests/data/",
+)
+
+# Documentation never changes shipped behaviour, so it stays Track B even under
+# a Track A prefix. Everything else under those prefixes is Track A.
+NON_SIM_SUFFIXES = (".md",)
+
 # Files that exist only in this fork; none may appear in a feature diff. This
 # tuple is the single source of truth. The docs point here instead of repeating
 # the list, so adding a fork-only file cannot leave a stale copy behind.
@@ -48,6 +70,7 @@ FORK_ONLY_PATHS = (
     ".github/pull_request_template.md",
     ".github/workflows/sync-mirror.yml",
     ".github/workflows/fork-only-view.yml",
+    ".github/workflows/fork-gates.yml",
 )
 
 # Anything under these prefixes is fork-only by construction, so a new fork-only
@@ -550,17 +573,24 @@ def changed_fork_markers(base: str, head: str) -> list[str]:
     return [path for path in FORK_BLOCK_FILES if fork_marker_lines(base, path) != fork_marker_lines(head, path)]
 
 
-def fork_state_problems(ref: str) -> list[str]:
+def fork_state_problems(ref: str, inherited_from: str | None = None) -> list[str]:
     """The fork-only state every stack ref must have, stated absolutely.
 
     A before/after comparison only catches a change made by the commit under
     review. It says nothing about a stack that was already wrong, so the end
     state is asserted here rather than inferred from a diff.
+
+    `inherited_from` relaxes exactly one case: a feature branch cut before a
+    fork-only file existed has not deleted it, it simply never had it. Absent
+    on both the branch and its own base is "behind", not "broken" (4.4).
     """
     problems = []
     for path in REQUIRED_FORK_FILES:
-        if show_file(ref, path) is None:
-            problems.append(f"{path} is missing; required fork-only infrastructure was deleted")
+        if show_file(ref, path) is not None:
+            continue
+        if inherited_from is not None and show_file(inherited_from, path) is None:
+            continue
+        problems.append(f"{path} is missing; required fork-only infrastructure was deleted")
     for path in FORK_WORKFLOW_FILES:
         if show_file(ref, path) is None:
             problems.append(f"{path} is missing; a shared workflow was deleted")
@@ -584,7 +614,7 @@ def strip_fork_block(text: str) -> str:
 
     Line endings are preserved: normalising them would let a CRLF/LF rewrite of
     a shared file compare equal to its upstream parent and ride along in the one
-    commit that is exempt from Gate 3.
+    commit that is exempt from Gate 2.
     """
     out, inside = [], False
     for line in text.splitlines(keepends=True):
@@ -734,6 +764,37 @@ def current_branch() -> str:
     return git("rev-parse", "HEAD") if branch == "HEAD" else branch
 
 
+def is_sim_path(path: str) -> bool:
+    if path.endswith(NON_SIM_SUFFIXES):
+        return False
+    return path in SIM_PATHS or path.startswith(SIM_PREFIXES)
+
+
+def track_of(base: str, head: str = "HEAD") -> tuple[str, list[str]]:
+    """Section 4.7: which review track this diff falls into, and why.
+
+    Returns ("A", <the sim paths that forced it>) or ("B", []).
+    """
+    sim = sorted(path for path in diff_files(base, head) if is_sim_path(path))
+    return ("A" if sim else "B"), sim
+
+
+def cmd_track(args: argparse.Namespace) -> int:
+    track, sim = track_of(args.base, args.head)
+    if args.quiet:
+        print(track)
+        return 0
+    report = Report("track", args.format)
+    if track == "A":
+        report.info(f"Track A -- sim-affecting ({len(sim)} path(s)); read the diff adversarially before merging")
+        for path in sim:
+            report.info(f"  {path}")
+    else:
+        report.info("Track B -- no sim-affecting path; CI, forkctl and a human read are the gate")
+    print(track, file=report.stream)
+    return 0
+
+
 def cmd_fork_only(args: argparse.Namespace) -> int:
     for path in FORK_ONLY_PATHS:
         print(path)
@@ -763,15 +824,13 @@ def cmd_check_commit(args: argparse.Namespace) -> int:
         f"git rebase {args.base} && git reset --soft {args.base} && git commit -F msg",
     )
 
-    # One commit *ahead* is not the same as rebased onto the current base: a
-    # branch cut weeks ago is still one commit ahead of where it started.
-    if one_commit:
-        report.check(
-            git("rev-parse", "HEAD^") == git("rev-parse", args.base),
-            f"rebased directly onto {args.base}",
-            f"the commit is not parented on the current {args.base} tip",
-            f"git rebase {args.base}",
-        )
+    # Being behind the base is not a defect. "Rebase and merge" replays the
+    # commit itself and refuses when it cannot, so the merge button already
+    # enforces linearity; failing here only forces every open PR to rebase and
+    # re-run its gates each time anything else lands.
+    if one_commit and git("rev-parse", "HEAD^") != git("rev-parse", args.base):
+        behind = len(git_lines("rev-list", f"HEAD^..{args.base}"))
+        report.warn(f"{behind} commit(s) behind {args.base}; rebase before merging if the button objects")
 
     subject = git("log", "-1", "--format=%s") if commits else ""
     problems = subject_problems(subject)
@@ -802,9 +861,10 @@ def cmd_check_commit(args: argparse.Namespace) -> int:
         "each shared file carries exactly one fork:begin/fork:end pair",
     )
 
-    # Asserted absolutely, in both modes: a before/after comparison cannot see a
-    # fork-only hunk that was already missing before this commit touched it.
-    state = fork_state_problems("HEAD")
+    # Asserted on the end state, in both modes: a before/after comparison cannot
+    # see a fork-only hunk that was already missing before this commit touched
+    # it. The branch's own merge base excuses a file the branch predates.
+    state = fork_state_problems("HEAD", inherited_from=git("merge-base", "HEAD", args.base))
     report.check(
         not state,
         "fork-only state is intact",
@@ -814,7 +874,16 @@ def cmd_check_commit(args: argparse.Namespace) -> int:
 
     if args.chore:
         report.info("fork-only file and hunk checks: exempt (chore(fork) branch)")
+        report.info("review track: B (fork-only infrastructure is never sim-affecting)")
         return report.finish()
+
+    track, sim = track_of(args.base)
+    if track == "A":
+        report.info(
+            f"review track: A -- sim-affecting; read the diff adversarially before merging ({len(sim)} path(s))"
+        )
+    else:
+        report.info("review track: B -- CI, forkctl and a human read are the gate (section 4.7)")
 
     offenders = fork_only_files_in(args.base)
     report.check(
@@ -843,8 +912,14 @@ def cmd_check_commit(args: argparse.Namespace) -> int:
     return report.finish()
 
 
-def verify_stack(report: Report, mirror_ref: str, stack_ref: str) -> str | None:
-    """Sections 3.3 and 7: stack invariants. Returns the fork base, or None."""
+def verify_stack(report: Report, mirror_ref: str, stack_ref: str, behind_is_notice: bool = False) -> str | None:
+    """Sections 3.3 and 7: stack invariants. Returns the fork base, or None.
+
+    A stack that is behind the mirror is a *sync* state, not a malformed stack:
+    it is the normal window between upstream moving and the next rebase, and it
+    is owned and reported by `sync-mirror.yml`. Callers that police something
+    else pass `behind_is_notice` so that window does not mask their own checks.
+    """
     if not require_refs(report, mirror_ref, stack_ref):
         return None
 
@@ -852,7 +927,17 @@ def verify_stack(report: Report, mirror_ref: str, stack_ref: str) -> str | None:
     stack = git("rev-parse", stack_ref)
 
     contains = git_rc("merge-base", "--is-ancestor", mirror, stack) == 0
-    if not report.check(
+    if not contains and behind_is_notice:
+        behind = len(git_lines("rev-list", f"{stack}..{mirror}"))
+        report.warn(
+            f"{stack_ref} is {behind} commit(s) behind {mirror_ref}; "
+            "the rebase is tracked by sync-mirror.yml, not by this check"
+        )
+        # Measure against the mirror the stack was actually built on, so the
+        # remaining invariants still describe this stack rather than failing
+        # for the one reason that is already reported elsewhere.
+        mirror = git("merge-base", mirror, stack)
+    elif not report.check(
         contains,
         f"{stack_ref} contains the {mirror_ref} tip",
         f"{stack_ref} does not contain the {mirror_ref} tip",
@@ -1008,7 +1093,7 @@ def resolve_feature_commit(report: Report, args: argparse.Namespace) -> str | No
             report.fail(f"commit not found: {args.sha}")
             return None
         sha = git("rev-parse", args.sha)
-        # Gate 3 must prove *the* commit being merged. Naming an older stack
+        # Gate 2 must prove *the* commit being merged. Naming an older stack
         # commit while a different one is checked out certified the wrong diff,
         # so --sha has to be the single commit of the branch under review; use
         # --subject to rebuild the mirror of a commit that is already stacked.
@@ -1022,16 +1107,19 @@ def resolve_feature_commit(report: Report, args: argparse.Namespace) -> str | No
         if sha != git("rev-parse", "HEAD"):
             report.fail(
                 f"--sha {sha[:9]} is not HEAD ({git('rev-parse', 'HEAD')[:9]})",
-                "Gate 3 proves the commit under review; use --subject to rebuild a stacked commit",
+                "Gate 2 proves the commit under review; use --subject to rebuild a stacked commit",
             )
             return None
-        parented_on_tip = git_rc("rev-parse", "--verify", "--quiet", f"{sha}^") == 0 and git(
-            "rev-parse", f"{sha}^"
-        ) == git("rev-parse", args.stack)
-        if not parented_on_tip:
+        # The invariant is "one commit, and its parent is on the stack line" --
+        # not "parented on the tip". A branch that is merely behind still has
+        # exactly one commit to prove, and failing it here would drag every open
+        # PR through a rebase each time something else lands (4.4).
+        parent_exists = git_rc("rev-parse", "--verify", "--quiet", f"{sha}^") == 0
+        on_stack_line = parent_exists and git_rc("merge-base", "--is-ancestor", f"{sha}^", args.stack) == 0
+        if not on_stack_line:
             report.fail(
-                f"{head} is not a single commit on top of the {args.stack} tip",
-                "squash to one commit and rebase onto the current stack tip (section 4.4)",
+                f"{head} is not a single commit on top of {args.stack}",
+                "squash to one commit branched from the stack (section 4.4)",
             )
             return None
         return sha
@@ -1065,7 +1153,7 @@ SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 
 
 def cmd_mirror(args: argparse.Namespace) -> int:
-    """Gate 3 and section 6: rebuild mirror/<slug> and prove it is upstream-clean."""
+    """Gate 2 and section 6: rebuild mirror/<slug> and prove it is upstream-clean."""
     report = Report(f"mirror/{args.slug}", args.format)
 
     # Validated before anything moves: a slug git rejects as a branch name would
@@ -1126,6 +1214,8 @@ def cmd_mirror(args: argparse.Namespace) -> int:
             candidate = git("rev-parse", "HEAD")
             if report.failed:
                 report.info(f"{branch} was left untouched; nothing was published")
+            elif args.no_publish:
+                report.info(f"checks only: {branch} was not moved")
             else:
                 if ref_exists(branch) and git("rev-parse", branch) != candidate:
                     report.info(f"{branch} moved from {git('rev-parse', branch)[:9]} to {candidate[:9]}")
@@ -1194,13 +1284,18 @@ def cmd_delete_mirror(args: argparse.Namespace) -> int:
         report.info("dry run; nothing deleted")
         return report.finish()
 
-    if git_rc("push", "origin", "--delete", f"mirror/{args.slug}") != 0:
-        report.fail("deleting the branch on origin failed", "check the remote and retry")
-        return report.finish()
+    # A mirror proven by CI never reaches origin (`mirror --no-publish`), so a
+    # local-only branch is the normal case, not a failed push.
     if git_lines("ls-remote", "--heads", "origin", f"mirror/{args.slug}"):
-        report.fail("the branch still exists on origin after the delete")
-        return report.finish()
-    report.ok("deleted on origin")
+        if git_rc("push", "origin", "--delete", f"mirror/{args.slug}") != 0:
+            report.fail("deleting the branch on origin failed", "check the remote and retry")
+            return report.finish()
+        if git_lines("ls-remote", "--heads", "origin", f"mirror/{args.slug}"):
+            report.fail("the branch still exists on origin after the delete")
+            return report.finish()
+        report.ok("deleted on origin")
+    else:
+        report.ok("not published to origin; nothing to delete there")
 
     # The remote delete is the part that matters for the upstream PR; a failed
     # local delete (usually because it is the current branch) is still a failure
@@ -1218,9 +1313,15 @@ def cmd_delete_mirror(args: argparse.Namespace) -> int:
 
 
 def cmd_check_view(args: argparse.Namespace) -> int:
-    """Section 2: fork-only/3.0 is a derived view, republished by hand."""
+    """Section 2: fork-only/3.0 is a derived view, republished by hand.
+
+    Whether the stack is current with upstream is deliberately not this check's
+    business: that is reported once, by sync-mirror.yml. Failing on it here
+    would skip every assertion below and silently disable the drift detector
+    for as long as a rebase is outstanding.
+    """
     report = Report("check-view", args.format)
-    base = verify_stack(report, args.mirror, args.stack)
+    base = verify_stack(report, args.mirror, args.stack, behind_is_notice=True)
     if base is None:
         return report.finish()
     report.ok(f"stack is sound; fork base is {base[:9]}")
@@ -1488,6 +1589,13 @@ def build_parser() -> argparse.ArgumentParser:
     add_fmt(p)
     p.set_defaults(func=cmd_check_commit)
 
+    p = sub.add_parser("track", help="review track for a diff (section 4.7)")
+    p.add_argument("--base", default=STACK_REF)
+    p.add_argument("--head", default="HEAD")
+    p.add_argument("--quiet", action="store_true", help="print only A or B")
+    add_fmt(p)
+    p.set_defaults(func=cmd_track)
+
     p = sub.add_parser("check-stack", help="stack invariants (sections 3.3, 7)")
     p.add_argument("--mirror", default=MIRROR_REF)
     p.add_argument("--stack", default=STACK_REF)
@@ -1506,7 +1614,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_fmt(p)
     p.set_defaults(func=cmd_check_view)
 
-    p = sub.add_parser("mirror", help="rebuild mirror/<slug> and prove it is upstream-clean (gate 3)")
+    p = sub.add_parser("mirror", help="rebuild mirror/<slug> and prove it is upstream-clean (Gate 2)")
     p.add_argument("slug")
     group = p.add_mutually_exclusive_group(required=True)
     group.add_argument("--sha", help="feature commit to cherry-pick")
@@ -1514,7 +1622,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--upstream", default=UPSTREAM_REF)
     p.add_argument("--mirror", default=MIRROR_REF)
     p.add_argument("--stack", default=STACK_REF)
-    p.add_argument("--stay", action="store_true", help="stay on the mirror branch")
+    publish = p.add_mutually_exclusive_group()
+    publish.add_argument("--stay", action="store_true", help="stay on the mirror branch")
+    publish.add_argument("--no-publish", action="store_true", help="prove the gate without moving mirror/<slug>")
     add_fmt(p)
     p.set_defaults(func=cmd_mirror)
 

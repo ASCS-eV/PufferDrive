@@ -69,6 +69,17 @@ def run(*argv: str) -> tuple[int, str]:
     return code, buf.getvalue()
 
 
+@contextlib.contextmanager
+def mock_required_fork_files(*extra: str):
+    """Pretend fork-only infrastructure just grew, without touching the fixture."""
+    original = forkctl.REQUIRED_FORK_FILES
+    forkctl.REQUIRED_FORK_FILES = original + tuple(extra)
+    try:
+        yield
+    finally:
+        forkctl.REQUIRED_FORK_FILES = original
+
+
 CI_YML_UPSTREAM = """\
 name: CI
 
@@ -172,7 +183,7 @@ class ForkRepoTest(unittest.TestCase):
         git(self.repo, "switch", "-q", "-c", name, "stack")
 
     def stacked_feature(self, subject: str, tree: dict[str, str], name: str = "feature/x") -> str:
-        """A one-commit branch on top of the stack tip, exactly as Gate 3 expects."""
+        """A one-commit branch on top of the stack tip, exactly as Gate 2 expects."""
         self.branch_from_stack(name)
         return commit(self.repo, subject, tree)
 
@@ -517,6 +528,46 @@ class TestMirror(ForkRepoTest):
         )
         self.assertEqual(code, 0, out)
 
+    def test_no_publish_proves_the_gate_without_moving_the_branch(self) -> None:
+        """CI proves Gate 2 on every PR; it must not leave mirror branches behind."""
+        git(self.repo, "branch", "mirror/clean", "up")
+        before = git(self.repo, "rev-parse", "mirror/clean")
+        sha = self.stacked_feature("feat(x): clean work", {"clean.c": "x\n"})
+        code, out = run(
+            "mirror",
+            "clean",
+            "--sha",
+            sha,
+            "--no-publish",
+            "--upstream",
+            "up",
+            "--mirror",
+            "mir",
+            "--stack",
+            "stack",
+        )
+        self.assertEqual(code, 0, out)
+        self.assertIn("was not moved", out)
+        self.assertEqual(git(self.repo, "rev-parse", "mirror/clean"), before)
+
+    def test_no_publish_still_fails_a_contaminated_commit(self) -> None:
+        sha = self.stacked_feature("feat(x): leak", {".github/fork/leaked.py": "secret\n"})
+        code, out = run(
+            "mirror",
+            "clean",
+            "--sha",
+            sha,
+            "--no-publish",
+            "--upstream",
+            "up",
+            "--mirror",
+            "mir",
+            "--stack",
+            "stack",
+        )
+        self.assertEqual(code, 1, out)
+        self.assertIn("fork-only file", out)
+
     def test_refuses_to_run_with_a_dirty_tree(self) -> None:
         write(self.repo, "scratch.txt", "uncommitted\n")
         code, out = run(
@@ -645,16 +696,52 @@ class TestReviewRegressions(ForkRepoTest):
         self.assertEqual(code, 1, out)
         self.assertIn("marker structure", out)
 
-    def test_a_stale_base_is_rejected(self) -> None:
-        """One commit *ahead* is not the same as rebased onto the current tip."""
+    def test_a_stale_base_is_a_notice_not_a_failure(self) -> None:
+        """Being behind the base does not block: "Rebase and merge" replays the
+        commit and refuses if it cannot, so failing here would only force every
+        open PR to rebase and re-run its gates each time something else lands."""
         self.feature_branch()
         commit(self.repo, "feat(x): mine", {"mine.c": "x\n"})
         git(self.repo, "switch", "-q", "stack")
         commit(self.repo, "feat(y): someone else landed first", {"theirs.c": "y\n"})
         git(self.repo, "switch", "-q", "feature/x")
         code, out = run("check-commit", "--base", "stack")
+        self.assertEqual(code, 0, out)
+        self.assertIn("1 commit(s) behind", out)
+
+    def test_being_behind_does_not_mask_a_real_failure(self) -> None:
+        """The downgrade must not turn a stale branch into a free pass."""
+        self.feature_branch()
+        commit(self.repo, "feat(x): mine", {".github/copilot-instructions.md": "leaked\n"})
+        git(self.repo, "switch", "-q", "stack")
+        commit(self.repo, "feat(y): someone else landed first", {"theirs.c": "y\n"})
+        git(self.repo, "switch", "-q", "feature/x")
+        code, out = run("check-commit", "--base", "stack")
         self.assertEqual(code, 1, out)
-        self.assertIn("not parented on the current", out)
+        self.assertIn("1 commit(s) behind", out)
+        self.assertIn("fork-only file", out)
+
+    def test_a_fork_file_the_branch_predates_is_not_a_deletion(self) -> None:
+        """A branch cut before a fork-only file existed has not deleted it. Failing
+        here would force every open PR to rebase whenever fork infrastructure grows."""
+        self.feature_branch()
+        commit(self.repo, "feat(x): mine", {"mine.c": "x\n"})
+        git(self.repo, "switch", "-q", "stack")
+        commit(self.repo, "chore(fork): add a guard", {".github/fork/new_guard.yml": "on: push\n"})
+        git(self.repo, "switch", "-q", "feature/x")
+        with mock_required_fork_files(".github/fork/new_guard.yml"):
+            code, out = run("check-commit", "--base", "stack")
+        self.assertEqual(code, 0, out)
+        self.assertIn("fork-only state is intact", out)
+
+    def test_deleting_a_fork_file_the_branch_did_inherit_is_still_caught(self) -> None:
+        """The excuse is "never had it", not "does not have it"."""
+        self.feature_branch()
+        git(self.repo, "rm", "-q", "CONTRIBUTING.md")
+        git(self.repo, "commit", "-q", "-m", "docs(x): drop the guide")
+        code, out = run("check-commit", "--base", "stack")
+        self.assertEqual(code, 1, out)
+        self.assertIn("CONTRIBUTING.md is missing", out)
 
     def test_a_non_conventional_subject_is_rejected(self) -> None:
         self.feature_branch()
@@ -692,13 +779,19 @@ class TestReviewRegressions(ForkRepoTest):
         self.assertEqual(code, 1, out)
         self.assertIn("unregistered", out)
 
-    def test_gate_three_refuses_an_arbitrary_commit(self) -> None:
-        """--sha must prove the commit being merged, not any commit that exists."""
-        git(self.repo, "switch", "-q", "-c", "elsewhere", "up")
-        outsider = commit(self.repo, "feat(x): unrelated external commit", {"x.c": "x\n"})
-        code, out = run("mirror", "arb", "--sha", outsider, "--upstream", "up", "--mirror", "mir", "--stack", "stack")
-        self.assertEqual(code, 1, out)
-        self.assertIn("not a single commit on top of", out)
+    def test_gate_three_accepts_a_branch_that_is_behind_the_stack_tip(self) -> None:
+        """Being behind is not a defect (4.4). Gate 2's question is whether the
+        commit cherry-picks onto pure upstream, which a stale base does not
+        change. An arbitrary commit is still refused -- by the rule that --sha
+        must be HEAD, covered by test_gate_three_refuses_a_commit_that_is_not_checked_out."""
+        sha = self.stacked_feature("feat(x): cut before the tip moved", {"mine.c": "x\n"})
+        git(self.repo, "switch", "-q", "stack")
+        commit(self.repo, "feat(y): landed first", {"theirs.c": "y\n"})
+        git(self.repo, "switch", "-q", "feature/x")
+        code, out = run(
+            "mirror", "behind", "--sha", sha, "--no-publish", "--upstream", "up", "--mirror", "mir", "--stack", "stack"
+        )
+        self.assertEqual(code, 0, out)
 
     def test_gate_three_refuses_a_commit_that_is_not_checked_out(self) -> None:
         git(self.repo, "switch", "-q", "-c", "elsewhere-2", "up")
@@ -999,22 +1092,48 @@ class TestRoundTwoRegressions(ForkRepoTest):
         git(self.repo, "switch", "-q", "-c", "mirror/busy", "up")
         saved = (forkctl.gh_available, forkctl.gh_json, forkctl.git_rc, forkctl.git_lines)
         original_rc = forkctl.git_rc
+        seen: list[tuple[str, ...]] = []
 
         def fake_rc(*args: str) -> int:
             # The remote delete succeeds; the local one cannot, because the
             # branch is checked out. The command must not call that success.
             return 0 if args[:3] == ("push", "origin", "--delete") else original_rc(*args)
 
+        def fake_lines(*args: str, **kwargs: object) -> list[str]:
+            # Published on the first look, gone after the delete.
+            seen.append(args)
+            return ["sha\trefs/heads/mirror/busy"] if len(seen) == 1 else []
+
         forkctl.gh_available = lambda: True
         forkctl.gh_json = lambda *a, **k: []
         forkctl.git_rc = fake_rc
-        forkctl.git_lines = lambda *a, **k: []
+        forkctl.git_lines = fake_lines
         try:
             code, out = run("delete-mirror", "busy")
         finally:
             forkctl.gh_available, forkctl.gh_json, forkctl.git_rc, forkctl.git_lines = saved
         self.assertEqual(code, 1, out)
+        self.assertIn("deleted on origin", out)
         self.assertIn("could not be deleted", out)
+
+    def test_delete_mirror_cleans_up_a_branch_that_was_never_published(self) -> None:
+        """`mirror --no-publish` is the normal path now, so most mirrors are local
+        only. Treating the absent remote branch as a failed push left them orphaned."""
+        empty_remote = self.repo.parent / "origin.git"
+        git(self.repo.parent, "init", "-q", "--bare", str(empty_remote))
+        git(self.repo, "remote", "add", "origin", str(empty_remote))
+        git(self.repo, "switch", "-q", "-c", "mirror/local-only", "up")
+        git(self.repo, "switch", "-q", "stack")
+        saved = (forkctl.gh_available, forkctl.gh_json)
+        forkctl.gh_available = lambda: True
+        forkctl.gh_json = lambda *a, **k: []
+        try:
+            code, out = run("delete-mirror", "local-only")
+        finally:
+            forkctl.gh_available, forkctl.gh_json = saved
+        self.assertEqual(code, 0, out)
+        self.assertIn("nothing to delete there", out)
+        self.assertFalse(forkctl.ref_exists("mirror/local-only"), out)
 
 
 class TestRoundThreeRegressions(ForkRepoTest):
@@ -1231,6 +1350,134 @@ class TestRoundFourRegressions(ForkRepoTest):
         self.assertIn(stripped, (upstream, upstream + separator))
 
 
+class TestBehindIsNotice(ForkRepoTest):
+    """A stack behind the mirror must not mask the checks that follow it.
+
+    `check-view` exists to detect view drift and standing-PR tampering. Before
+    the split, one outstanding rebase failed the very first invariant and
+    returned early, so those detectors silently stopped running for as long as
+    the rebase was outstanding -- an alarm that disables the detector it guards.
+    """
+
+    def _verify(self, behind_is_notice: bool) -> tuple[bool, str, str | None]:
+        buf = io.StringIO()
+        report = forkctl.Report("test", stream=buf)
+        base = forkctl.verify_stack(report, "mir", "stack", behind_is_notice=behind_is_notice)
+        return report.failed, buf.getvalue(), base
+
+    def _move_mirror_ahead(self) -> None:
+        git(self.repo, "switch", "-q", "mir")
+        commit(self.repo, "upstream: moved on", {"README.md": "newer\n"})
+        git(self.repo, "switch", "-q", "stack")
+
+    def test_behind_still_fails_by_default(self) -> None:
+        self._move_mirror_ahead()
+        failed, out, base = self._verify(behind_is_notice=False)
+        self.assertTrue(failed, out)
+        self.assertIsNone(base)
+        self.assertIn("does not contain", out)
+
+    def test_behind_is_a_warning_and_the_rest_still_runs(self) -> None:
+        self._move_mirror_ahead()
+        failed, out, base = self._verify(behind_is_notice=True)
+        self.assertFalse(failed, out)
+        self.assertIn("1 commit(s) behind", out)
+        self.assertIn("sync-mirror.yml", out)
+        self.assertIn("exactly one chore(fork): commit", out)
+        self.assertEqual(base, self.base)
+
+    def test_a_behind_stack_is_still_measured_for_real_violations(self) -> None:
+        """The fallback must not become a blanket pass."""
+        self._move_mirror_ahead()
+        commit(self.repo, "chore(fork): second one", {"CONTRIBUTING.md": "again\n"})
+        failed, out, base = self._verify(behind_is_notice=True)
+        self.assertTrue(failed, out)
+        self.assertIn("2 chore(fork): commits", out)
+
+    def test_an_up_to_date_stack_warns_about_nothing(self) -> None:
+        failed, out, base = self._verify(behind_is_notice=True)
+        self.assertFalse(failed, out)
+        self.assertNotIn("behind", out)
+        self.assertEqual(base, self.base)
+
+
+class TestTrack(ForkRepoTest):
+    """Review effort is tiered by what the change can break, not by its size."""
+
+    def test_a_simulator_change_is_track_a(self) -> None:
+        self.stacked_feature(
+            "feat(drive): touch the sim",
+            {"pufferlib/ocean/drive/drive.h": "float x;\n"},
+        )
+        code, out = run("track", "--base", "stack", "--head", "HEAD")
+        self.assertEqual(code, 0, out)
+        self.assertIn("Track A", out)
+        self.assertIn("pufferlib/ocean/drive/drive.h", out)
+
+    def test_a_docs_only_change_is_track_b(self) -> None:
+        self.stacked_feature("docs: explain a thing", {"README.md": "clearer\n"})
+        code, out = run("track", "--base", "stack", "--head", "HEAD")
+        self.assertEqual(code, 0, out)
+        self.assertIn("Track B", out)
+
+    def test_fork_tooling_is_track_b(self) -> None:
+        self.stacked_feature(
+            "chore(fork): tweak the tooling",
+            {".github/fork/forkctl.py": "# changed\n"},
+        )
+        code, out = run("track", "--base", "stack", "--head", "HEAD")
+        self.assertEqual(code, 0, out)
+        self.assertIn("Track B", out)
+
+    def test_a_mixed_change_is_track_a(self) -> None:
+        """One simulator path is enough; the tier is the maximum, not the average."""
+        self.stacked_feature(
+            "feat(drive): sim plus docs",
+            {"README.md": "clearer\n", "config/puffer_drive.yaml": "lr: 0.1\n"},
+        )
+        code, out = run("track", "--base", "stack", "--head", "HEAD")
+        self.assertEqual(code, 0, out)
+        self.assertIn("Track A", out)
+
+    def test_a_markdown_file_under_a_simulator_path_is_track_b(self) -> None:
+        """Documentation cannot change behaviour, wherever it lives."""
+        self.stacked_feature(
+            "docs(drive): document the observation layout",
+            {"pufferlib/ocean/drive/README.md": "layout\n"},
+        )
+        code, out = run("track", "--base", "stack", "--head", "HEAD")
+        self.assertEqual(code, 0, out)
+        self.assertIn("Track B", out)
+
+    def test_the_smoke_goldens_are_track_a(self) -> None:
+        self.stacked_feature(
+            "test(drive): refresh goldens",
+            {"tests/smoke_tests/data/drive_smoke_golden.json": "{}\n"},
+        )
+        code, out = run("track", "--base", "stack", "--head", "HEAD")
+        self.assertEqual(code, 0, out)
+        self.assertIn("Track A", out)
+
+    def test_quiet_prints_only_the_track(self) -> None:
+        self.stacked_feature("docs: explain a thing", {"README.md": "clearer\n"})
+        code, out = run("track", "--base", "stack", "--head", "HEAD", "--quiet")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(out.strip(), "B")
+
+    def test_check_commit_reports_the_track(self) -> None:
+        self.stacked_feature("feat(drive): touch the sim", {"pufferlib/drive.c": "int x;\n"})
+        code, out = run("check-commit", "--base", "stack")
+        self.assertEqual(code, 0, out)
+        self.assertIn("review track: A", out)
+
+    def test_chore_mode_reports_track_b(self) -> None:
+        self.branch_from_stack("chore/x")
+        commit(self.repo, "chore(fork): adjust the process", {"CONTRIBUTING.md": "new\n"})
+        code, out = run("check-commit", "--base", "stack", "--chore")
+        self.assertEqual(code, 0, out)
+        self.assertIn("review track: B", out)
+
+
 class TestPureHelpers(unittest.TestCase):
     def test_fork_only_paths_are_matched_exactly(self) -> None:
         self.assertTrue(forkctl.is_fork_only_path("CONTRIBUTING.md"))
@@ -1249,6 +1496,19 @@ class TestPureHelpers(unittest.TestCase):
         )
         self.assertEqual(forkctl.diff_content_lines(diff), ["-old line", "+new line"])
         self.assertEqual(forkctl.diff_content_lines(diff, added_only=True), ["+new line"])
+
+    def test_simulator_paths_are_matched_by_prefix(self) -> None:
+        self.assertTrue(forkctl.is_sim_path("pufferlib/ocean/drive/drive.h"))
+        self.assertTrue(forkctl.is_sim_path("pufferl.py"))
+        self.assertTrue(forkctl.is_sim_path("config/puffer_drive.yaml"))
+        self.assertFalse(forkctl.is_sim_path("tests/drive/test_obs.py"))
+        self.assertFalse(forkctl.is_sim_path(".github/workflows/ci.yml"))
+
+    def test_a_lookalike_prefix_is_not_a_simulator_path(self) -> None:
+        """Prefixes are anchored at a directory boundary, names match exactly."""
+        self.assertFalse(forkctl.is_sim_path("docs/pufferlib/notes.c"))
+        self.assertFalse(forkctl.is_sim_path("pufferl.py.bak"))
+        self.assertFalse(forkctl.is_sim_path("configs/other.yaml"))
 
 
 if __name__ == "__main__":

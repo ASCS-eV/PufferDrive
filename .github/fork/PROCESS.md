@@ -12,7 +12,8 @@ Read the section you need, when you need it. The core tells you which one:
 | --- | --- |
 | merge or close one of the two standing draft PRs | [Standing PRs](#the-standing-draft-prs) |
 | change a fork-only file (`chore/<slug>`) | [Changing fork-only content](#changing-fork-only-content) |
-| review someone else's feature PR | [Adversarial review](#adversarial-review) |
+| review a Track A (sim-affecting) feature PR | [Adversarial review](#adversarial-review) |
+| regenerate the smoke goldens | [Smoke goldens](#smoke-goldens) |
 | open, refresh, or retire an upstream PR | [Mirror PR workflow](#mirror-pr-workflow-fork--upstream) |
 | rebase the stack onto new upstream, or cut a release | [Syncing and releasing](#syncing-and-releasing) |
 
@@ -61,10 +62,17 @@ stack as well.
   is a far worse trade than one extra line in two procedures that are already manual.
 - `.github/workflows/fork-only-view.yml` is therefore a **detector, not a publisher**, and needs no
   write access at all (`contents: read`). It re-derives the fork base, **fails if `fork-only/3.0` is
-  missing or stale** and prints the exact command to fix it, refuses to pass a stack that violates
-  the stack invariants in *Syncing and releasing*, and checks that the standing PR still has base `3.0`, draft status and
-  the `do-not-merge` label. It runs on pushes to `integration/3.0` **and to `fork-only/3.0`** (so
-  tampering with the view itself is caught), plus daily, plus on demand. Drift is loud, not silent.
+  missing or stale** and prints the exact command to fix it, and checks that the standing PR still
+  has base `3.0`, draft status and the `do-not-merge` label. It runs on pushes to `integration/3.0`
+  **and to `fork-only/3.0`** (so tampering with the view itself is caught), plus daily, plus on
+  demand. Drift is loud, not silent.
+- **A stack that is behind upstream is not view drift, and does not fail this job.** It is the
+  normal window between upstream moving and the next rebase, and it is owned by `sync-mirror.yml`,
+  which tracks it in an issue. `forkctl check-view` reports it with `::warning::` and then measures
+  the remaining invariants against the mirror the stack was actually built on. This matters: before
+  the split, one outstanding rebase turned the job red *and* returned early, so the view-drift and
+  standing-PR checks — the only reason the job exists — silently stopped running for as long as the
+  rebase was outstanding. An alarm that disables the detector it guards is worse than no alarm.
 - **The workflow does not open the PR either; a human does, once** — this repository deliberately
   withholds PR-creation rights from `GITHUB_TOKEN` (`can_approve_pull_request_reviews: false`).
   Afterwards the workflow only *checks* it: it warns when the standing PR is missing, and **fails
@@ -103,7 +111,8 @@ stack. Maintaining that invariant has consequences:
      and label.
 
    An agent that misses all of these is not reading.
-4. Gates 1 and 2 (core section 4.8) apply in full. Gate 3 does not — see the exemption there.
+4. Gate 1 (core section 4.8) applies in full. The upstream half of Gate 2 does not — see the
+   exemption there.
 5. When the gates pass, mark it ready for review, then **do not press the merge button.** Apply it
    by folding it into the base commit instead:
 
@@ -157,6 +166,14 @@ set. Watch the standing draft PR afterwards and be ready to fix forward quickly.
 The PR then ends up **closed, not merged**. Post the resulting `integration/3.0` SHA in the PR
 thread so the trail survives; a closed-unmerged PR with no explanation looks like abandoned work.
 
+**A fold rewrites the base, so every open PR is now parented on a commit that is no longer on the
+stack.** Rebase each one (`git rebase origin/integration/3.0`, force-push); that also re-runs their
+checks against the new base. Nothing else recovers them, so fold when few PRs are open.
+
+**If the chore commit adds a gating workflow, add it to the required checks only *after* the fold.**
+A required check that cannot run sits pending forever and blocks every merge — including the
+feature PRs you need to land first. The workflow does not exist until its commit is in the base.
+
 **Keep the window short.** Between opening a `chore/<slug>` PR and folding it in, the default branch
 still serves the *old* rules, and every agent that clones the fork in that window follows them — see
 section 2. A fork-only PR is a **review vehicle, not a delivery mechanism**: nothing in it is in
@@ -169,14 +186,18 @@ commit — do not fold it into the feature commit.
 
 ## Adversarial review
 
-Every feature PR is adversarially reviewed before it may be stacked. The reviewer's job is to
-**try to break the change**, not to confirm that it looks reasonable. "LGTM" is not a review.
+**This is a reading aid for whoever presses "Rebase and merge" on a Track A change** — one touching
+`pufferlib/`, `config/`, `pufferl.py`, `models.py`, `setup.py` or the smoke goldens, as decided by
+`forkctl track`. There is no separate review step to run and nothing to post before merging (core
+section 4.7); these are simply the questions worth asking before the button, because a defect on
+`integration/3.0` is multiplied across every consumer and every later feature.
 
-**The reviewer is not the author.** When an agent wrote the change, the review runs as a *separate
-task with fresh context* — a reviewer still holding the author's reasoning reproduces the author's
-blind spots.
+Track B changes (docs, fork tooling, workflows, CI, build scripts, tests) get one read of the diff
+and none of this.
 
-Work through all of these, and answer them in writing:
+The aim is to **try to break the change**, not to confirm that it looks reasonable.
+
+Walk these:
 
 - **Does the test actually test it?** Revert the source change, keep the new test, confirm the test
   fails. A test that passes against unfixed code proves nothing.
@@ -195,13 +216,49 @@ Work through all of these, and answer them in writing:
 - **Upstream reception.** Would an upstream maintainer request changes? Naming, file placement,
   config surface, a knob we want but they would not. Fix it now, not after they ask.
 
-Post the outcome as a PR review listing what was probed and what was found — **including the probes
-that found nothing**, so the next reader knows the coverage. Each finding is either fixed or
-explicitly accepted by a human, with the reason in the thread.
+Write something down only when you find something. A list of probes that found nothing helps nobody,
+and anything you do find is either fixed before the button or noted in the thread as accepted.
+
+**Do not spend a comment on anything a tool owns.** Whitespace, import order, line length,
+formatting and wording preference belong to `pre-commit`; commit shape and fork-only contamination
+belong to `forkctl`. If one of those reaches you, the finding is "the tool did not catch this" —
+report it once and fix the tool. Hand-annotating instances costs the author a round trip, costs an
+agent a full context reload, and leaves the next change just as exposed.
+
+## Smoke goldens
+
+The golden train/rollout values are a *behavioural* fixture: they change only when observation
+layout, dynamics, rewards or RNG draw order change. If your change legitimately moves them,
+regenerate inside the pinned QEMU image so the numbers match CI, rather than on your own machine:
+
+```bash
+tests/smoke_tests/update_goldens.sh
+```
+
+Review the diff, then stage both files **in the same single commit as the change that caused them**.
+`tests/smoke_tests/data/` matches `.gitignore`, so **both** goldens need `-f` even though both are
+already tracked — a plain `git add` on them exits 1:
+
+```bash
+git add -f tests/smoke_tests/data/drive_smoke_golden.json \
+           tests/smoke_tests/data/drive_rollout_golden.json
+```
+
+**Goldens are base-dependent.** Values regenerated on `integration/3.0` are not necessarily valid on
+pure `upstream/3.0`: our stack may already carry a feature that moved them. So if Gate 2 shows the
+smoke test failing on `mirror/<slug>`, regenerate *there* and carry the corrected values back —
+never assume our stack's numbers are upstream's.
+
+A commit whose goldens depend on an earlier feature that upstream does not have is **not**
+upstream-ready. It does not stack until that dependency is resolved, because Gate 2 would be a
+promise we could not keep.
+
+Touching the goldens makes a change Track A by construction (`forkctl track` lists
+`tests/smoke_tests/data/` as sim-affecting), so the full review above applies.
 
 ## Mirror PR workflow (fork → upstream)
 
-Gate 3 (section 4.8) already proved this commit cherry-picks cleanly. Do **not** assume the branch
+Gate 2 (section 4.8) already proved this commit cherry-picks cleanly. Do **not** assume the branch
 it produced still exists: it is local-only, the feature branch is deleted from `origin` on merge,
 and the agent opening the upstream PR is usually not the one that ran the gate. **Always rebuild the
 mirror branch from scratch.**
@@ -217,7 +274,7 @@ forkctl mirror <slug> --subject "fix(scope): the exact commit subject" --stay
 
 `--subject` resolves the commit against the live stack and aborts unless **exactly one** commit
 matches, so an ambiguous or stale subject cannot silently mirror the wrong change. `--stay` leaves
-you on `mirror/<slug>`, ready to push. The same fork-only file and marker guards as Gate 3 run
+you on `mirror/<slug>`, ready to push. The same fork-only file and marker guards as Gate 2 run
 here: this is the authoritative check, not a formality, because the stack may have been rebased
 since the gate last passed.
 
@@ -257,7 +314,7 @@ are proposing is exercised by the very checks that gate it.
 ### Agent authorship and upstream's `AGENTS.md`
 
 Upstream's `AGENTS.md` asks that an agent creating a PR add a file named `AGENTIC_PR` containing a
-French poem. It is an agent-detection canary, and it collides with Gate 3, which requires the mirror
+French poem. It is an agent-detection canary, and it collides with Gate 2, which requires the mirror
 diff to contain nothing but the feature's own files.
 
 **Our resolution: disclose instead of complying, and say that we are doing so.** Every upstream PR
@@ -414,7 +471,7 @@ Decide explicitly, and record the decision in the PR and in the commit subject:
 
 - **Keep it as a fork-only behaviour change** — reclassify it under core section 3.2, add its path or
   marker to `FORK_ONLY_PATHS` / `FORK_HUNK_MARKERS` in `.github/fork/forkctl.py` (with a test), and
-  rename the commit to `chore(fork):` so the core section 4.5 and Gate 3 guards start treating it as
+  rename the commit to `chore(fork):` so the core section 4.5 and Gate 2 guards start treating it as
   something that must *never* leave. This is the honest outcome for a change upstream has declined
   on principle.
 - **Drop it** — if it only existed to be upstreamed, remove it from the stack (*Changing fork-only content*) rather
@@ -424,7 +481,7 @@ Either way, close the mirror PR with a reason, delete `mirror/<slug>`, and note 
 next agent does not reopen the same conversation with upstream.
 
 **In all three cases**, if the feature commit was rewritten on our side at any point after the
-mirror branch was built, that mirror is stale — rebuild it and re-prove Gate 3 (core section 6) before
+mirror branch was built, that mirror is stale — rebuild it and re-prove Gate 2 (core section 6) before
 drawing any conclusion from `git cherry`, which compares the stale patch rather than the live one.
 
 ## Syncing and releasing
@@ -434,10 +491,17 @@ drawing any conclusion from `git cherry`, which compares the stale patch rather 
 non-fast-forward, which is the alarm that someone committed to the mirror. `3.0` additionally blocks
 force-pushes, deletions, and non-linear history. Do not push to it by hand.
 
-When the mirror moves ahead of the stack, the same workflow opens (and keeps updated) a
-`mirror-sync` tracking issue; it closes the issue automatically once `integration/3.0` contains the
-mirror head. The rebase itself stays manual — replaying features onto new upstream code can
-conflict and must be re-tested.
+When the mirror moves ahead of the stack, the same workflow opens (and keeps updated) a tracking
+issue titled `Rebase integration/3.0 onto upstream 3.0`, and closes it automatically once
+`integration/3.0` contains the mirror head. It is matched by **exact title, not by a label**: a
+label is a second object that must exist before the issue can be filed, and a masked
+`gh label create ... || true` once failed silently while every scheduled run went red on the
+`gh issue create` that depended on it.
+
+That issue is the **only** alarm for an outstanding rebase, and nothing fails while it is open.
+Being behind upstream is the normal window between upstream moving and the next rebase, not a
+defect, and a daily red cron for a known state trains everyone to ignore the board. The rebase
+itself stays manual — replaying features onto new upstream code can conflict and must be re-tested.
 
 **Rebase the stack** (maintainers):
 
@@ -488,7 +552,7 @@ treat a release as blocked until that is green.
 Drop commits that upstream has already merged; never resurrect them — *After upstream responds* gives the
 mechanics, including the case where upstream merged a *modified* version. After any rebase that
 rewrote a feature commit, its `mirror/<slug>` branch is stale: if an upstream PR is already open on
-it, *While the mirror PR is open* applies and the PR must be refreshed; if not, Gate 3 must be re-proven before that
+it, *While the mirror PR is open* applies and the PR must be refreshed; if not, Gate 2 must be re-proven before that
 feature is offered upstream. Either way, a commit whose content changed materially needs re-review.
 
 **Divergence report.** The stack is upstream *debt*: every feature commit we carry is one upstream
@@ -507,7 +571,7 @@ non-zero gap is the normal state, not an error.
 permanently carries at least one `chore(fork):` commit, because the files in section 3.1 do not
 exist upstream by design. An agent that reads a non-zero gap as a defect and tries to close it by
 upstreaming that commit would leak the entire fork-only process into `Emerge-Lab/PufferDrive` —
-precisely what Gate 3 exists to prevent.
+precisely what Gate 2 exists to prevent.
 
 **The number that should trend to zero is the feature gap.** Zero means upstream has absorbed
 everything we carry and the fork is pure scaffolding again; that is the steady state we are aiming
@@ -521,7 +585,7 @@ and the second kind belongs in a `chore(fork):` commit where the guards can see 
 `git push origin HEAD:<ref>`, and it triggers on pushes to `3.0` as well as `workflow_dispatch`.
 Never dispatch it against `3.0`: it would commit to the mirror and break the clean base for every
 upstream PR. If it ever does, `sync-mirror.yml` is the detector — it refuses the non-fast-forward
-and the mirror-sync issue appears. Recover by resetting `3.0` to `upstream/3.0` (the branch
+and the rebase tracking issue appears. Recover by resetting `3.0` to `upstream/3.0` (the branch
 protection on `3.0` blocks force-pushes, so this needs an admin and should be done deliberately).
 
 **Release for the BMW submodule:** after a green rebase, run the divergence report above and confirm

@@ -1,0 +1,68 @@
+# Fork-only. Never cherry-pick this file upstream.
+#
+# Runs the mechanical merge gates so nobody has to run them by hand or paste
+# their output into a pull request. Gate 1 is the rest of CI; this job is
+# check-commit plus Gate 2, reported like any other check. Text output, not
+# annotations: this log is what a reviewer reads instead of a pasted block.
+name: Fork gates
+
+on:
+  pull_request:
+    branches:
+      - 'integration/3.0'
+
+permissions:
+  contents: read
+
+jobs:
+  gates:
+    name: Fork gates
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout the pull request head
+        uses: actions/checkout@v4
+        with:
+          # The merge ref would put a synthetic merge commit at HEAD, and every
+          # gate reasons about the real commit the branch carries.
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      # Checking out a SHA leaves HEAD detached, which `mirror` refuses: it has
+      # to know which branch to return you to.
+      - name: Put HEAD on a branch
+        run: git switch -c gate-head
+
+      - name: Fetch upstream
+        run: |
+          git remote add upstream https://github.com/Emerge-Lab/PufferDrive.git
+          git fetch --no-tags --quiet upstream 3.0:refs/remotes/upstream/3.0
+
+      - name: Identify the change
+        id: id
+        run: |
+          branch='${{ github.event.pull_request.head.ref }}'
+          echo "slug=${branch#*/}" >> "$GITHUB_OUTPUT"
+          case "$(git log -1 --format=%s)" in
+            'chore(fork):'*) echo "chore=true" >> "$GITHUB_OUTPUT" ;;
+            *)               echo "chore=false" >> "$GITHUB_OUTPUT" ;;
+          esac
+
+      - name: Review track
+        run: python .github/fork/forkctl.py track
+
+      - name: check-commit
+        run: |
+          if [ '${{ steps.id.outputs.chore }}' = 'true' ]; then
+            python .github/fork/forkctl.py check-commit --chore
+          else
+            python .github/fork/forkctl.py check-commit
+          fi
+
+      # A chore(fork) commit is fork-only by definition, so it has no upstream
+      # form to prove. Section 4.8 exempts it.
+      #
+      # always(): an author should get both gate results from one run, not fix
+      # check-commit and only then discover Gate 2 is red too.
+      - name: 'Gate 2: upstream-readiness'
+        if: always() && steps.id.outputs.chore == 'false'
+        run: python .github/fork/forkctl.py mirror '${{ steps.id.outputs.slug }}' --sha HEAD --no-publish
