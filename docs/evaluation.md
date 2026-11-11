@@ -215,3 +215,5 @@ training. Mid-training evaluation currently shares
 final evaluation runs at the last epoch. Training evaluation logs benchmark
 metric means to the active logger and writes reports under the training run's
 `eval/training` hierarchy.
+
+<!-- probe: exercises the documentation-only branch of the ci.yml changes job -->
