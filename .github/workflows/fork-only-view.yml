@@ -2,26 +2,11 @@ name: Fork-only view
 
 # Fork-only. Verifies that the `fork-only/3.0` view branch still matches the single
 # `chore(fork):` commit on `integration/3.0`, and that its standing draft PR is intact.
+# It detects drift; it cannot publish, because GITHUB_TOKEN may not push workflow files.
+# A stack that is behind upstream is reported by sync-mirror.yml, not here.
 #
-# It deliberately does NOT publish the branch. The fork base is made almost entirely of
-# files under `.github/workflows/`, and GitHub blocks `GITHUB_TOKEN` from pushing any
-# commit that creates or updates a workflow file — a platform rule no `permissions:`
-# block can lift. Publishing therefore happens by hand, in the two procedures that
-# already force-push with human credentials (see .github/fork/PROCESS.md). This job is
-# the detector that makes drift loud, and it needs no write access at all.
-#
-# The checks themselves live in .github/fork/forkctl.py so that CI, humans and agents
-# run the same tested code. This file only decides *when* to run them.
-#
-# Residual trust, stated plainly. A workflow cannot be a tamper-proof monitor of the
-# same repository that stores it: on `push`, GitHub runs the workflow *definition* from
-# the pushed ref, so a tampered `fork-only/3.0` can neuter or delete this file before the
-# trusted checkout above ever executes. The backstop is the `schedule:` trigger, which
-# GitHub always runs from the **default branch** (`integration/3.0`) regardless of what
-# any other branch contains -- so tampering is caught within a day even if the push-time
-# run was suppressed. `integration/3.0` policing itself is the irreducible core: it is
-# branch-protected, and section 3.3 / section 7 are the only procedures permitted to
-# force-push it.
+# Why it never publishes, and what it does and does not prove about tampering:
+# .github/fork/PROCESS.md -> The standing draft PRs.
 #
 # Never cherry-pick this workflow upstream.
 

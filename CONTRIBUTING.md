@@ -44,7 +44,9 @@ never commit to it.** Like the PR above it carries `do-not-merge` **alone**: the
 *together* are reserved for a PR that is actively rewriting the process, and a permanent PR wearing
 both would signal that forever.
 
-When upstream advances, a bot opens a `mirror-sync` issue asking a maintainer to rebase the stack.
+When upstream advances, a bot opens an issue titled `Rebase integration/3.0 onto upstream 3.0`
+asking a maintainer to rebase the stack. Nothing fails while it is open — being behind upstream is
+a normal window, not a defect.
 
 ## Working on a feature
 
@@ -84,10 +86,19 @@ Opening the PR is not the finish line. `integration/3.0` is what BMW pins *and* 
 later feature rebases onto, so a defect merged there is multiplied. Three gates, all required:
 
 1. **Green CI** on the final commit — not "green except a flake", not "green before the last push".
-2. **Adversarial review** by someone other than the author, who tries to *break* the change: revert
-   the fix and prove the new test fails, hunt edge cases, check determinism, check observation and
-   config layout, check hot-path cost, check scope creep. "LGTM" is not a review. The findings go in
-   the PR thread, including the probes that found nothing.
+2. **Adversarial review** by someone other than the author. How much review depends on what the
+   change can break — `forkctl track` decides:
+   - **Track A** (`pufferlib/`, `config/`, `pufferl.py`, `models.py`, `setup.py`, smoke goldens):
+     the reviewer tries to *break* the change — revert the fix and prove the new test fails, hunt
+     edge cases, check determinism, observation and config layout, hot-path cost, scope creep.
+     "LGTM" is not a review. Findings go in the thread, including the probes that found nothing.
+   - **Track B** (everything else — docs, tooling, workflows, CI, tests): one human read answering
+     three questions — does it do what it says, can it break anything outside its own files, is it
+     the simplest version. No written probe list.
+
+   Either way, **nits are a process bug, not a review comment.** Formatting, import order, line
+   length and wording belong to `pre-commit`; commit shape and contamination belong to `forkctl`.
+   If one reaches review, fix the tool instead of annotating the instance.
 3. **Proven upstream-readiness** — the commit is cherry-picked onto a branch cut from pure
    `upstream/3.0` *before* merging. It must apply without conflict and produce an upstream-clean
    diff. We stack only commits we could contribute today. (`chore(fork):` commits are exempt from
@@ -120,6 +131,11 @@ stack nobody can contribute from.
 table says so. If your change moves the smoke goldens, regenerate them with
 `tests/smoke_tests/update_goldens.sh` and stage both JSON files in the same commit (the rollout
 golden is gitignored and needs `git add -f`).
+
+A **Track B** change — one `forkctl track` reports as touching no simulator path — needs only
+`pre-commit`, plus whatever directly exercises what it changed (its own tests, a workflow
+dispatch). Running the simulator suites to prove a Markdown edit is safe costs twelve minutes and
+proves nothing; CI runs them anyway on the standing stack PR.
 
 New behaviour needs a new test; a bug fix needs a test that fails without the fix. List the commands
 you ran in the PR.

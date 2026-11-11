@@ -81,16 +81,17 @@ jobs:
         if: steps.stack.outputs.needs_rebase == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
           UPSTREAM_SHA: ${{ steps.sync.outputs.upstream_sha }}
           BEHIND: ${{ steps.stack.outputs.behind }}
           TITLE: Rebase integration/3.0 onto upstream 3.0
         run: |
-          gh label create mirror-sync --color FBCA04 \
-            --description "Integration stack is behind the upstream mirror" 2>/dev/null || true
-
           {
             echo "The \`3.0\` mirror has advanced to \`$UPSTREAM_SHA\`."
             echo "\`integration/3.0\` is missing **$BEHIND** upstream commit(s)."
+            echo
+            echo "This issue is the *only* alarm for an outstanding rebase. No workflow fails"
+            echo "while it is open: being behind upstream is a normal window, not a defect."
             echo
             echo '```bash'
             echo "git fetch origin"
@@ -112,21 +113,36 @@ jobs:
             echo "Closes automatically once \`integration/3.0\` contains the mirror head."
           } > issue_body.md
 
-          existing=$(gh issue list --label mirror-sync --state open \
-            --search "$TITLE in:title" --json number --jq '.[0].number // empty')
+          # Found by exact title, never by a label. A label is a second object that has
+          # to exist before the issue can be filed, and `gh label create ... || true` hid
+          # its own failure here while every run went red on the create that needed it.
+          #
+          # No --search: that hits the search API, whose index is eventually consistent,
+          # so a freshly filed issue is invisible to it. A plain list is strongly
+          # consistent. GH_REPO is set explicitly rather than inferred from the checkout.
+          open_issues=$(gh issue list --state open --limit 100 --json number,title)
+          echo "Open issues: $open_issues"
+          existing=$(printf '%s' "$open_issues" \
+            | jq -r "[.[] | select(.title == env.TITLE)][0].number // empty")
 
           if [ -n "$existing" ]; then
             gh issue edit "$existing" --body-file issue_body.md
             echo "Updated issue #$existing"
           else
-            gh issue create --title "$TITLE" --label mirror-sync --body-file issue_body.md
+            gh issue create --title "$TITLE" --body-file issue_body.md
           fi
 
       - name: Close the tracking issue when the stack is current
         if: steps.stack.outputs.needs_rebase == 'false'
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TITLE: Rebase integration/3.0 onto upstream 3.0
         run: |
-          for n in $(gh issue list --label mirror-sync --state open --json number --jq '.[].number'); do
+          open_issues=$(gh issue list --state open --limit 100 --json number,title)
+          echo "Open issues: $open_issues"
+          for n in $(printf '%s' "$open_issues" \
+            | jq -r "[.[] | select(.title == env.TITLE)][].number"); do
             gh issue close "$n" --comment "\`integration/3.0\` now contains the mirror head."
+            echo "Closed issue #$n"
           done

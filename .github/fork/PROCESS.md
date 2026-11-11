@@ -12,7 +12,8 @@ Read the section you need, when you need it. The core tells you which one:
 | --- | --- |
 | merge or close one of the two standing draft PRs | [Standing PRs](#the-standing-draft-prs) |
 | change a fork-only file (`chore/<slug>`) | [Changing fork-only content](#changing-fork-only-content) |
-| review someone else's feature PR | [Adversarial review](#adversarial-review) |
+| review a Track A (sim-affecting) feature PR | [Adversarial review](#adversarial-review) |
+| regenerate the smoke goldens | [Smoke goldens](#smoke-goldens) |
 | open, refresh, or retire an upstream PR | [Mirror PR workflow](#mirror-pr-workflow-fork--upstream) |
 | rebase the stack onto new upstream, or cut a release | [Syncing and releasing](#syncing-and-releasing) |
 
@@ -61,10 +62,17 @@ stack as well.
   is a far worse trade than one extra line in two procedures that are already manual.
 - `.github/workflows/fork-only-view.yml` is therefore a **detector, not a publisher**, and needs no
   write access at all (`contents: read`). It re-derives the fork base, **fails if `fork-only/3.0` is
-  missing or stale** and prints the exact command to fix it, refuses to pass a stack that violates
-  the stack invariants in *Syncing and releasing*, and checks that the standing PR still has base `3.0`, draft status and
-  the `do-not-merge` label. It runs on pushes to `integration/3.0` **and to `fork-only/3.0`** (so
-  tampering with the view itself is caught), plus daily, plus on demand. Drift is loud, not silent.
+  missing or stale** and prints the exact command to fix it, and checks that the standing PR still
+  has base `3.0`, draft status and the `do-not-merge` label. It runs on pushes to `integration/3.0`
+  **and to `fork-only/3.0`** (so tampering with the view itself is caught), plus daily, plus on
+  demand. Drift is loud, not silent.
+- **A stack that is behind upstream is not view drift, and does not fail this job.** It is the
+  normal window between upstream moving and the next rebase, and it is owned by `sync-mirror.yml`,
+  which tracks it in an issue. `forkctl check-view` reports it with `::warning::` and then measures
+  the remaining invariants against the mirror the stack was actually built on. This matters: before
+  the split, one outstanding rebase turned the job red *and* returned early, so the view-drift and
+  standing-PR checks — the only reason the job exists — silently stopped running for as long as the
+  rebase was outstanding. An alarm that disables the detector it guards is worse than no alarm.
 - **The workflow does not open the PR either; a human does, once** — this repository deliberately
   withholds PR-creation rights from `GITHUB_TOKEN` (`can_approve_pull_request_reviews: false`).
   Afterwards the workflow only *checks* it: it warns when the standing PR is missing, and **fails
@@ -169,8 +177,15 @@ commit — do not fold it into the feature commit.
 
 ## Adversarial review
 
-Every feature PR is adversarially reviewed before it may be stacked. The reviewer's job is to
-**try to break the change**, not to confirm that it looks reasonable. "LGTM" is not a review.
+**This applies to Track A only** — a change touching `pufferlib/`, `config/`, `pufferl.py`,
+`models.py`, `setup.py` or the smoke goldens, as decided by `forkctl track`. Track B changes (docs,
+fork tooling, workflows, CI, build scripts, tests) get one human read against the three questions in
+core section 4.7, and none of this checklist. Spending a fresh-context agent and a written probe
+list on a Markdown edit is the cost the tiering exists to remove; skipping them on a reward change
+is the risk it exists to keep paying for.
+
+The reviewer's job is to **try to break the change**, not to confirm that it looks reasonable.
+"LGTM" is not a review.
 
 **The reviewer is not the author.** When an agent wrote the change, the review runs as a *separate
 task with fresh context* — a reviewer still holding the author's reasoning reproduces the author's
@@ -198,6 +213,43 @@ Work through all of these, and answer them in writing:
 Post the outcome as a PR review listing what was probed and what was found — **including the probes
 that found nothing**, so the next reader knows the coverage. Each finding is either fixed or
 explicitly accepted by a human, with the reason in the thread.
+
+**Do not spend a review comment on anything a tool owns.** Whitespace, import order, line length,
+formatting and wording preference belong to `pre-commit`; commit shape and fork-only contamination
+belong to `forkctl`. If one of those reaches review, the finding is "the tool did not catch this" —
+report it once and fix the tool. Hand-annotating instances costs the author a round trip, costs an
+agent a full context reload, and leaves the next change just as exposed.
+
+## Smoke goldens
+
+The golden train/rollout values are a *behavioural* fixture: they change only when observation
+layout, dynamics, rewards or RNG draw order change. If your change legitimately moves them,
+regenerate inside the pinned QEMU image so the numbers match CI, rather than on your own machine:
+
+```bash
+tests/smoke_tests/update_goldens.sh
+```
+
+Review the diff, then stage both files **in the same single commit as the change that caused them**.
+`tests/smoke_tests/data/` matches `.gitignore`, so **both** goldens need `-f` even though both are
+already tracked — a plain `git add` on them exits 1:
+
+```bash
+git add -f tests/smoke_tests/data/drive_smoke_golden.json \
+           tests/smoke_tests/data/drive_rollout_golden.json
+```
+
+**Goldens are base-dependent.** Values regenerated on `integration/3.0` are not necessarily valid on
+pure `upstream/3.0`: our stack may already carry a feature that moved them. So if Gate 3 shows the
+smoke test failing on `mirror/<slug>`, regenerate *there* and carry the corrected values back —
+never assume our stack's numbers are upstream's.
+
+A commit whose goldens depend on an earlier feature that upstream does not have is **not**
+upstream-ready. It does not stack until that dependency is resolved, because Gate 3 would be a
+promise we could not keep.
+
+Touching the goldens makes a change Track A by construction (`forkctl track` lists
+`tests/smoke_tests/data/` as sim-affecting), so the full review above applies.
 
 ## Mirror PR workflow (fork → upstream)
 
@@ -434,10 +486,17 @@ drawing any conclusion from `git cherry`, which compares the stale patch rather 
 non-fast-forward, which is the alarm that someone committed to the mirror. `3.0` additionally blocks
 force-pushes, deletions, and non-linear history. Do not push to it by hand.
 
-When the mirror moves ahead of the stack, the same workflow opens (and keeps updated) a
-`mirror-sync` tracking issue; it closes the issue automatically once `integration/3.0` contains the
-mirror head. The rebase itself stays manual — replaying features onto new upstream code can
-conflict and must be re-tested.
+When the mirror moves ahead of the stack, the same workflow opens (and keeps updated) a tracking
+issue titled `Rebase integration/3.0 onto upstream 3.0`, and closes it automatically once
+`integration/3.0` contains the mirror head. It is matched by **exact title, not by a label**: a
+label is a second object that must exist before the issue can be filed, and a masked
+`gh label create ... || true` once failed silently while every scheduled run went red on the
+`gh issue create` that depended on it.
+
+That issue is the **only** alarm for an outstanding rebase, and nothing fails while it is open.
+Being behind upstream is the normal window between upstream moving and the next rebase, not a
+defect, and a daily red cron for a known state trains everyone to ignore the board. The rebase
+itself stays manual — replaying features onto new upstream code can conflict and must be re-tested.
 
 **Rebase the stack** (maintainers):
 
@@ -521,7 +580,7 @@ and the second kind belongs in a `chore(fork):` commit where the guards can see 
 `git push origin HEAD:<ref>`, and it triggers on pushes to `3.0` as well as `workflow_dispatch`.
 Never dispatch it against `3.0`: it would commit to the mirror and break the clean base for every
 upstream PR. If it ever does, `sync-mirror.yml` is the detector — it refuses the non-fast-forward
-and the mirror-sync issue appears. Recover by resetting `3.0` to `upstream/3.0` (the branch
+and the rebase tracking issue appears. Recover by resetting `3.0` to `upstream/3.0` (the branch
 protection on `3.0` blocks force-pushes, so this needs an admin and should be done deliberately).
 
 **Release for the BMW submodule:** after a green rebase, run the divergence report above and confirm
