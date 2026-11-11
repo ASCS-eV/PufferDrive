@@ -1511,7 +1511,7 @@ class TestPureHelpers(unittest.TestCase):
         self.assertFalse(forkctl.is_sim_path("configs/other.yaml"))
 
 
-class TestRoundFourRegressions(ForkRepoTest):
+class TestRoundFiveRegressions(ForkRepoTest):
     """Found by the first run of the gate on a real feature pull request."""
 
     def test_a_cherry_pick_that_fails_without_conflicts_is_not_entanglement(self) -> None:
