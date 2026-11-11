@@ -15,8 +15,8 @@ original_stderr = sys.stderr
 sys.stdout = open(os.devnull, "w")
 sys.stderr = open(os.devnull, "w")
 try:
-    import gymnasium
-    import pygame
+    import gymnasium  # noqa: F401
+    import pygame  # noqa: F401
 except ImportError:
     pass
 sys.stdout.close()

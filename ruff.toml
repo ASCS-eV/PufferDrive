@@ -1,6 +1,11 @@
 line-length = 120
 target-version = "py310"
 
+[lint]
+# Narrow, zero-false-positive set: names that do not resolve and imports that
+# are never used. Widen only together with the fixes a wider set demands.
+select = ["E9", "F401", "F811", "F821", "F822"]
+
 [lint.isort]
 lines-after-imports = 2
 split-on-trailing-comma = false

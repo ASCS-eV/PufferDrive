@@ -23,9 +23,7 @@ With a policy:
 """
 
 import argparse
-import math
 import xml.etree.ElementTree as ET
-from pathlib import Path
 
 import numpy as np
 
