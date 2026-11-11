@@ -48,6 +48,7 @@ obs, info = env.reset(seed=42)
 N = env.num_agents
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+config["policy"]["fused_slot_encoder"] = config["policy"]["fused_slot_encoder"] and device.type == "cuda"
 policy = DrivePolicy(env, **config["policy"]).to(device)
 
 if CHECKPOINT_PATH:
