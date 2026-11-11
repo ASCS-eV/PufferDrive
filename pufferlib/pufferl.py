@@ -56,7 +56,7 @@ from pufferlib.config_schema import (
 
 
 try:
-    from pufferlib import _C
+    from pufferlib import _C  # noqa: F401
 except ImportError:
     raise ImportError(
         "Failed to import C/CUDA advantage kernel. If you have non-default PyTorch, try installing with --no-build-isolation"

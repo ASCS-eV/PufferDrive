@@ -20,6 +20,7 @@ terminate_on_goal — that isolates the feature from the inactive-agent path.
 import os
 
 import numpy as np
+import pytest
 
 from pufferlib.ocean.drive.drive import Drive
 

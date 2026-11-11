@@ -4,7 +4,6 @@ import math
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
-from matplotlib.transforms import Affine2D
 import torch
 
 from pufferlib.ocean.evaluation_utils.wosac import map_metric_features
@@ -130,8 +129,6 @@ def plot_test_cases():
     inner_y = [1, 3, 3, 1, 1]
     ax.plot(inner_x, inner_y, "b-", linewidth=2)
     # Fill road area
-    from matplotlib.patches import Polygon
-
     outer_poly = np.array([[0, 0], [4, 0], [4, 4], [0, 4]])
     inner_poly = np.array([[1, 1], [1, 3], [3, 3], [3, 1]])
     ax.fill(outer_x, outer_y, alpha=0.2, color="green")
