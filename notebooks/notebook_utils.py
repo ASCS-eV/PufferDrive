@@ -6,7 +6,6 @@ import numpy as np
 import yaml
 
 from pufferlib.ocean.drive.drive import Drive
-from pufferlib.ocean.drive import binding
 from pufferlib.ocean.torch import Drive as DrivePolicy
 from pufferlib.pufferl import load_config
 

@@ -135,12 +135,13 @@ def load_benchmark_config(config_path, selected_names, map_dir_override=None, nu
         raise pufferlib.APIUsageError(f"Unknown benchmarks: {', '.join(missing_names)}")
 
     selected_benchmark_configs = []
+    cosim_benchmarks = []
     for name in selected_names:
         benchmark = configured_benchmarks[name]
         if benchmark.get("simulation_mode") == "carla_cosim":
             from pufferlib.ocean.evaluation_utils.cosim_evaluator import parse_cosim_benchmark
 
-            resolved_benchmarks.append(parse_cosim_benchmark(name, benchmark))
+            cosim_benchmarks.append(parse_cosim_benchmark(name, benchmark))
             continue
         if num_scenarios_override is not None:
             benchmark = {**benchmark, "num_scenarios": num_scenarios_override}
@@ -154,6 +155,7 @@ def load_benchmark_config(config_path, selected_names, map_dir_override=None, nu
         "benchmark_config",
         validate_resources=False,
     )
+    resolved_benchmarks.extend(cosim_benchmarks)
     return environment_config, resolved_benchmarks
 
 

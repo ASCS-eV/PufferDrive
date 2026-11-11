@@ -1,11 +1,11 @@
 from .environment import *
 
 try:
-    import torch
+    import torch  # noqa: F401
 except ImportError:
     pass
 else:
-    from .torch import Policy
+    from .torch import Policy  # noqa: F401
 
     try:
         from .torch import Recurrent

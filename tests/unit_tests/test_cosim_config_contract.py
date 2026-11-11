@@ -196,5 +196,23 @@ class TestShadowEnvKwargs(unittest.TestCase):
         self.assertEqual(kwargs["num_goals"], 3)
 
 
+class TestCosimBenchmarkResolution(unittest.TestCase):
+    def test_shipped_carla_cosim_benchmark_resolves(self):
+        """Selecting a cosim benchmark must return it alongside the replay ones.
+
+        The cosim branch of load_benchmark_config appended to the result list
+        before that list existed, so every selection containing carla_cosim
+        died with UnboundLocalError.
+        """
+        from pufferlib.ocean.evaluation_utils.evaluation_utils import load_benchmark_config
+
+        benchmark_yaml = REPO_ROOT / "pufferlib" / "config" / "evaluation" / "benchmark.yaml"
+        _, benchmarks = load_benchmark_config(str(benchmark_yaml), "carla_cosim")
+
+        self.assertEqual([b["name"] for b in benchmarks], ["carla_cosim"])
+        self.assertEqual(benchmarks[0]["simulation_mode"], "carla_cosim")
+        self.assertEqual(benchmarks[0]["route_ids"], [0, 1, 2])
+
+
 if __name__ == "__main__":
     unittest.main()
