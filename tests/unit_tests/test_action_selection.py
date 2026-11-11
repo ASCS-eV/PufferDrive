@@ -201,7 +201,8 @@ def test_drive_mean_action_is_exact_in_physical_units(monkeypatch):
         action_type="continuous",
     )
     try:
-        policy = ocean_torch.Drive(env, **args["policy"])
+        # the fused encoder is a CUDA/triton kernel and plays no part in the action table
+        policy = ocean_torch.Drive(env, **{**args["policy"], "fused_slot_encoder": False})
 
         num_lat = len(binding.JERK_LAT)
         lat_zero_idx = binding.JERK_LAT.index(0.0)
