@@ -80,6 +80,34 @@ itself is mid-change:
 forkctl doctor
 ```
 
+### If `git fetch` or a `forkctl` command stalls
+
+Every workflow here starts with `git fetch origin && git fetch upstream`, and `forkctl status`,
+`check-view` and `delete-mirror` reach the network themselves. When the SSH path to GitHub is
+blocked these block indefinitely rather than failing, so the stall looks like a hung tool. `forkctl`
+prints its local report first, so `status` stalls *after* the divergence listing rather than before
+it — the absence of the trailing mirror section is the clue.
+
+On Windows this is easy to hit. The `make` targets need a POSIX shell, so the natural habit is to
+run everything inside WSL — but WSL often cannot reach GitHub over SSH even on a machine where
+Windows reaches it in a couple of seconds.
+
+Check which side is at fault, from each:
+
+```bash
+git ls-remote origin -h refs/heads/integration/3.0
+```
+
+If that returns promptly from Windows and hangs in WSL, split the work: run anything that touches
+the network from Windows — `git fetch`, `git push`, `gh`, and `forkctl status`, `check-view`,
+`delete-mirror` — and keep WSL for the `make` targets and the offline checks, which are
+`check-commit`, `check-stack`, `track`, `fork-only` and `mirror`. (`mirror` only cherry-picks
+between refs you have already fetched; it never pushes.) Switching the remote to HTTPS inside WSL
+also works if you would rather stay in one shell.
+
+`doctor` sits in neither list: it does call GitHub, but over HTTPS through `gh`, so a broken SSH
+path leaves it working — the `git fetch` the setup block runs just before it is what stalls.
+
 ## Before anything is stacked
 
 Opening the PR is not the finish line. `integration/3.0` is what BMW pins *and* the base every
