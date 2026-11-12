@@ -10,51 +10,7 @@ jobs:
   # Every test job runs unless this job succeeded and positively reported
   # code=false, so a broken detector costs time rather than coverage.
   changes:
-    name: Detect code changes
-    runs-on: ubuntu-latest
-    outputs:
-      code: ${{ steps.filter.outputs.code }}
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Decide whether anything testable changed
-        id: filter
-        env:
-          BASE_REF: ${{ github.base_ref }}
-        run: |
-          # Conservative by construction: only a recognised documentation path
-          # votes "no code". Anything unrecognised -- and every push build, which
-          # has no base to diff against -- runs the full suite.
-          if [ -z "$BASE_REF" ]; then
-            echo "Push build: running everything."
-            echo "code=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          git fetch --no-tags origin "$BASE_REF"
-          base=$(git merge-base FETCH_HEAD HEAD)
-          # --no-renames: a rename is reported as its destination alone, so moving
-          # a module under docs/ would otherwise hide the deleted code path.
-          changed=$(git diff --no-renames --name-only "$base" HEAD)
-
-          echo "Changed files:"
-          echo "$changed"
-
-          # `grep -v` exits 1 when everything was filtered out, which is exactly
-          # the documentation-only case, so it must not trip `set -e`.
-          testable=$(echo "$changed" | grep -Ev '(\.md$|^docs/|^\.github/ISSUE_TEMPLATE/)' || true)
-
-          if [ -z "$testable" ]; then
-            echo "Documentation only: skipping the test jobs."
-            echo "code=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "Testable changes present:"
-            echo "$testable"
-            echo "code=true" >> "$GITHUB_OUTPUT"
-          fi
+    uses: ./.github/workflows/detect-code-changes.yml
 
   unit-tests:
     name: Unit Tests
