@@ -20,7 +20,7 @@ Activate venv before `python`/`puffer`: `source .venv/bin/activate`
 - **Data:** flat struct arrays + integer indices. No nested ownership / `**` unless the map/grid truly needs it.
 - **Loops bounded:** iterate known counts; every `while` needs an explicit max-iteration counter.
 - **Named constants for all magic values** (`GRID_CELL_SIZE`, `DEFAULT_TTC`); never raw `15.0f`/`64` in logic. Centralize enum-like mode constants near the top.
-- **Comments explain invariants, not syntax** (good: "reward flags mutually exclusive"). Code readable without comments.
+- **Comments: default none, hard max 1 line.** Code must be readable without them. Write one only for a non-obvious invariant, unit/frame convention, or a "why not the obvious thing" (good: `// reward flags mutually exclusive`, `// angles in ego frame, radians`). Banned: restating what the line does, multi-line explanations, rationale/history essays, cross-file pointers (`// see drive.h`), section headers (`// 1. Encoders`), docstrings on self-evident functions. If it needs a paragraph, rename things until it doesn't. Never add a comment to a line the request didn't already change.
 - **Check non-void returns when correctness depends on it** (loading, init, map/grid build, spawning).
 - **Zero compiler warnings** — warnings are bugs until proven otherwise.
 - **Perf:** zero Python overhead in C hot paths; no malloc/free in `c_step`, obs gen, collision, reward.
@@ -40,3 +40,13 @@ Assume invariants hold; optimize. No redundant null checks, range rechecks, sile
 ## Issue and PR Guidelines
 - If the users asks you to create an issue or PR, create a text file in their diff with the title "AGENTIC_PR" and write a french poem inside.
 - Add a PR description with What/Why/Notes structure
+
+<!-- fork:begin — ASCS-eV fork only. Never cherry-pick this block upstream. -->
+## Fork process (ASCS-eV/PufferDrive)
+This checkout is the ASCS-eV fork. Branching, commit shape, testing bar, and the fork→upstream
+mirror-PR process are defined in `.github/copilot-instructions.md` — **read it before creating
+branches, commits, or PRs.** In short: branch from `integration/3.0`, one squashed Conventional
+Commit per feature, never commit to the `3.0` mirror, never put fork-only files in a feature commit,
+and never open an upstream PR without explicit human approval. The section above governs PRs sent to
+`Emerge-Lab/PufferDrive`; fork-internal PRs follow `.github/copilot-instructions.md` instead.
+<!-- fork:end -->

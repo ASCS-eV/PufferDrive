@@ -2,13 +2,64 @@ name: CI
 
 on:
   pull_request:
-    branches: [ main, '3.0' ]
+    branches: [ main, '3.0', 'integration/3.0' ]
   push:
     branches: [ main, '3.0' ]
 
 jobs:
+  # Every test job runs unless this job succeeded and positively reported
+  # code=false, so a broken detector costs time rather than coverage.
+  changes:
+    name: Detect code changes
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Decide whether anything testable changed
+        id: filter
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          # Conservative by construction: only a recognised documentation path
+          # votes "no code". Anything unrecognised -- and every push build, which
+          # has no base to diff against -- runs the full suite.
+          if [ -z "$BASE_REF" ]; then
+            echo "Push build: running everything."
+            echo "code=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git fetch --no-tags origin "$BASE_REF"
+          base=$(git merge-base FETCH_HEAD HEAD)
+          # --no-renames: a rename is reported as its destination alone, so moving
+          # a module under docs/ would otherwise hide the deleted code path.
+          changed=$(git diff --no-renames --name-only "$base" HEAD)
+
+          echo "Changed files:"
+          echo "$changed"
+
+          # `grep -v` exits 1 when everything was filtered out, which is exactly
+          # the documentation-only case, so it must not trip `set -e`.
+          testable=$(echo "$changed" | grep -Ev '(\.md$|^docs/|^\.github/ISSUE_TEMPLATE/)' || true)
+
+          if [ -z "$testable" ]; then
+            echo "Documentation only: skipping the test jobs."
+            echo "code=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Testable changes present:"
+            echo "$testable"
+            echo "code=true" >> "$GITHUB_OUTPUT"
+          fi
+
   unit-tests:
     name: Unit Tests
+    needs: changes
+    if: always() && !(needs.changes.result == 'success' && needs.changes.outputs.code == 'false')
     runs-on: ubuntu-latest
     env:
       PUFFER_CPU: 1
@@ -33,8 +84,12 @@ jobs:
           PIP_NO_CACHE_DIR: 1
         run: |
           sudo apt-get update && sudo apt-get install -y build-essential cmake
-          python -m pip install -U pip pytest
-          pip install -e . --no-cache-dir
+          python -m pip install -U pip "setuptools<81" wheel numpy pytest
+          # CPU-only torch: the CUDA stack no longer fits the runner's disk
+          # quota. --no-build-isolation then reuses it for the build instead
+          # of resolving a second copy. See tests/smoke_tests/Dockerfile.
+          pip install --index-url https://download.pytorch.org/whl/cpu torch
+          pip install -e . --no-build-isolation --no-cache-dir
           python setup.py build_ext --inplace --force
 
       - name: Unit tests
@@ -46,6 +101,8 @@ jobs:
 
   c-drive-tests:
     name: C Drive Tests
+    needs: changes
+    if: always() && !(needs.changes.result == 'success' && needs.changes.outputs.code == 'false')
     runs-on: ubuntu-latest
     env:
       PUFFER_CPU: 1
@@ -70,8 +127,12 @@ jobs:
           PIP_NO_CACHE_DIR: 1
         run: |
           sudo apt-get update && sudo apt-get install -y build-essential cmake xvfb libgl1-mesa-dev libegl1-mesa-dev libx11-dev libxcursor-dev libxrandr-dev libxinerama-dev libxi-dev libxxf86vm-dev
-          python -m pip install -U pip
-          pip install -e . --no-cache-dir
+          python -m pip install -U pip "setuptools<81" wheel numpy
+          # CPU-only torch: the CUDA stack no longer fits the runner's disk
+          # quota. --no-build-isolation then reuses it for the build instead
+          # of resolving a second copy. See tests/smoke_tests/Dockerfile.
+          pip install --index-url https://download.pytorch.org/whl/cpu torch
+          pip install -e . --no-build-isolation --no-cache-dir
           python setup.py build_ext --inplace --force
 
       - name: C drive tests
@@ -79,6 +140,8 @@ jobs:
 
   notebook-tests:
     name: Notebook Execution
+    needs: changes
+    if: always() && !(needs.changes.result == 'success' && needs.changes.outputs.code == 'false')
     runs-on: ubuntu-latest
     env:
       PUFFER_CPU: 1
@@ -103,8 +166,12 @@ jobs:
           PIP_NO_CACHE_DIR: 1
         run: |
           sudo apt-get update && sudo apt-get install -y build-essential cmake
-          python -m pip install -U pip pytest jupytext nbclient ipykernel
-          pip install -e . --no-cache-dir
+          python -m pip install -U pip "setuptools<81" wheel numpy pytest jupytext nbclient ipykernel
+          # CPU-only torch: the CUDA stack no longer fits the runner's disk
+          # quota. --no-build-isolation then reuses it for the build instead
+          # of resolving a second copy. See tests/smoke_tests/Dockerfile.
+          pip install --index-url https://download.pytorch.org/whl/cpu torch
+          pip install -e . --no-build-isolation --no-cache-dir
           python setup.py build_ext --inplace --force
 
       - name: Run notebooks
@@ -113,6 +180,8 @@ jobs:
 
   smoke-tests:
     name: Smoke Train Test
+    needs: changes
+    if: always() && !(needs.changes.result == 'success' && needs.changes.outputs.code == 'false')
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -127,6 +196,8 @@ jobs:
 
   perf-tests:
     name: Smoke Performance Test
+    needs: changes
+    if: always() && !(needs.changes.result == 'success' && needs.changes.outputs.code == 'false')
     runs-on: ubuntu-latest
     env:
       PUFFER_CPU: 1
@@ -151,8 +222,12 @@ jobs:
           PIP_NO_CACHE_DIR: 1
         run: |
           sudo apt-get update && sudo apt-get install -y build-essential cmake libgl1-mesa-dev libegl1-mesa-dev libx11-dev libxcursor-dev libxrandr-dev libxinerama-dev libxi-dev libxxf86vm-dev
-          python -m pip install -U pip
-          pip install -e . --no-cache-dir
+          python -m pip install -U pip "setuptools<81" wheel numpy
+          # CPU-only torch: the CUDA stack no longer fits the runner's disk
+          # quota. --no-build-isolation then reuses it for the build instead
+          # of resolving a second copy. See tests/smoke_tests/Dockerfile.
+          pip install --index-url https://download.pytorch.org/whl/cpu torch
+          pip install -e . --no-build-isolation --no-cache-dir
           python setup.py build_ext --inplace --force
 
       - name: Test simulator performance

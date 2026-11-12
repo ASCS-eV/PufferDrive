@@ -26,7 +26,6 @@ from matplotlib.patches import Polygon  # noqa: E402
 
 from nuplan.common.actor_state.state_representation import Point2D  # noqa: E402
 from nuplan.common.maps.maps_datatypes import SemanticMapLayer  # noqa: E402
-from nuplan.planning.simulation.simulation_log import SimulationLog  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import nuplan_log_remap  # noqa: E402  logs written on another machine (cluster paths, planner classes)

@@ -945,6 +945,7 @@ def test_policy_builds_from_the_released_driver_env(sdc_replay_map_dir):
     with patch.object(sys, "argv", ["pufferl.py"]):
         args = pufferl.load_config("puffer_drive")
     args["train"]["device"] = "cpu"
+    args["policy"]["fused_slot_encoder"] = False  # the fused encoder needs triton, which is CUDA-only
     env_kwargs = {
         "num_agents": SDC_SCENARIO_COUNT,
         "num_maps": SDC_SCENARIO_COUNT,
