@@ -1,0 +1,45 @@
+name: Probe matrix skip
+
+on:
+  pull_request:
+    branches: [ 'integration/3.0' ]
+
+jobs:
+  gate:
+    name: probe gate
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.decide.outputs.code }}
+    steps:
+      - name: Report no code
+        id: decide
+        run: echo "code=false" >> "$GITHUB_OUTPUT"
+
+  job-level-skip:
+    name: probe joblevel ${{ matrix.py }} - ${{ matrix.os }}
+    needs: gate
+    if: always() && !(needs.gate.result == 'success' && needs.gate.outputs.code == 'false')
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        py: ["3.11", "3.12"]
+    steps:
+      - name: Would have tested
+        run: echo "ran ${{ matrix.py }} on ${{ matrix.os }}"
+
+  step-level-skip:
+    name: probe steplevel ${{ matrix.py }} - ${{ matrix.os }}
+    needs: gate
+    if: always()
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        py: ["3.11", "3.12"]
+    steps:
+      - name: Would have tested
+        if: always() && !(needs.gate.result == 'success' && needs.gate.outputs.code == 'false')
+        run: echo "ran ${{ matrix.py }} on ${{ matrix.os }}"
